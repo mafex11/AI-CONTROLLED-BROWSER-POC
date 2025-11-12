@@ -1,5 +1,6 @@
 # Core dependencies
-pipecat-ai[deepgram,elevenlabs,local]>=0.0.1
+pipecat-ai[deepgram,elevenlabs,local,silero]>=0.0.1
+onnxruntime>=1.20.1
 python-dotenv>=1.0.0
 aiohttp>=3.9.0
 numpy>=1.24.0

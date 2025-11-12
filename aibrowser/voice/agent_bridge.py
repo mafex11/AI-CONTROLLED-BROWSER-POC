@@ -83,12 +83,179 @@ class AgentBridge:
 				if narration and narration.strip():
 					asyncio.create_task(self._send_to_tts(narration.strip()))
 
-			# Create step callback for step summaries (optional)
+			# Create step callback for step-by-step narration
 			def step_callback(step: int, reasoning: str, narration: str, tool: str, phase: str) -> None:
-				# Only speak narration on 'after' phase to avoid too much chatter
-				if phase == 'after' and narration and narration.strip():
-					# Send narration to TTS
-					asyncio.create_task(self._send_to_tts(narration.strip()))
+				"""Handle step callbacks with detailed, conversational narration."""
+				# Helper function to convert tool to natural language
+				def tool_to_natural(t: str) -> str:
+					if not t or not t.strip():
+						return ''
+					t_lower = t.lower().strip()
+					if t_lower.startswith('search('):
+						try:
+							query_start = t_lower.find("query='") + 7
+							query_end = t_lower.find("'", query_start)
+							if query_end > query_start:
+								query = t_lower[query_start:query_end]
+								return f"searching for '{query}'"
+						except:
+							pass
+						return "searching"
+					elif t_lower.startswith('navigate('):
+						try:
+							url_start = t_lower.find("url='") + 5
+							url_end = t_lower.find("'", url_start)
+							if url_end > url_start:
+								url = t_lower[url_start:url_end]
+								if '//' in url:
+									domain = url.split('//')[-1].split('/')[0]
+									return f"navigating to {domain}"
+						except:
+							pass
+						return "navigating to a webpage"
+					elif t_lower.startswith('click('):
+						if 'index=' in t_lower:
+							try:
+								idx_start = t_lower.find("index=") + 6
+								idx_end = t_lower.find(',', idx_start)
+								if idx_end == -1:
+									idx_end = t_lower.find(')', idx_start)
+								if idx_end > idx_start:
+									idx = t_lower[idx_start:idx_end].strip()
+									return f"clicking on element {idx}"
+							except:
+								pass
+						return "clicking on the page"
+					elif t_lower.startswith('input('):
+						try:
+							text_start = t_lower.find("text='") + 6
+							text_end = t_lower.find("'", text_start)
+							if text_end > text_start:
+								text = t_lower[text_start:text_end]
+								text_preview = text[:20] + '...' if len(text) > 20 else text
+								return f"typing '{text_preview}'"
+						except:
+							pass
+						return "typing text"
+					elif t_lower.startswith('scroll('):
+						if 'direction=' in t_lower:
+							try:
+								dir_start = t_lower.find("direction='") + 11
+								dir_end = t_lower.find("'", dir_start)
+								if dir_end > dir_start:
+									direction = t_lower[dir_start:dir_end]
+									return f"scrolling {direction}"
+							except:
+								pass
+						return "scrolling the page"
+					elif t_lower.startswith('send_keys('):
+						return "pressing keys"
+					elif t_lower.startswith('screenshot('):
+						return "taking a screenshot"
+					return t_lower.replace('_', ' ').replace('()', '')
+				
+				# Helper function to join parts naturally
+				def join_naturally(parts_list: list[str]) -> str:
+					parts_list = [p.strip() for p in parts_list if p and p.strip()]
+					if not parts_list:
+						return ''
+					if len(parts_list) == 1:
+						return parts_list[0]
+					if len(parts_list) == 2:
+						return f"{parts_list[0]}. {parts_list[1]}"
+					all_but_last = ', '.join(parts_list[:-1])
+					return f"{all_but_last}, and {parts_list[-1]}"
+				
+				if phase == 'before':
+					# Before executing: explain what we're about to do in natural language
+					# Prioritize narration (agent's natural explanation) over technical reasoning
+					message = None
+					
+					# First, use narration if available (this is the agent's natural explanation)
+					if narration and narration.strip():
+						narration_clean = narration.strip()
+						# Make it sound more conversational if it doesn't already
+						if not narration_clean.lower().startswith(('let me', 'i\'ll', 'i will', 'i\'m going to', 'i need to')):
+							message = f"Let me {narration_clean.lower()}"
+						else:
+							message = narration_clean
+					
+					# If no narration, convert tool to natural high-level action
+					if not message and tool and tool.strip() and tool not in {'Task completed', 'Awaiting user input'}:
+						tool_natural = tool_to_natural(tool)
+						if tool_natural:
+							# Make it conversational
+							if tool_natural.startswith('searching'):
+								# Extract query for better narration
+								try:
+									if 'for \'' in tool_natural:
+										query = tool_natural.split('for \'')[1].split('\'')[0]
+										message = f"Let me search for {query}"
+									else:
+										message = "Let me search"
+								except:
+									message = "Let me search"
+							elif tool_natural.startswith('navigating'):
+								# Extract domain for better narration
+								if 'to ' in tool_natural:
+									domain = tool_natural.split('to ')[1]
+									message = f"Let me navigate to {domain}"
+								else:
+									message = "Let me navigate to the page"
+							elif tool_natural.startswith('clicking'):
+								message = "Let me click on that"
+							elif tool_natural.startswith('typing'):
+								message = "Let me type that in"
+							elif tool_natural.startswith('scrolling'):
+								message = "Let me scroll down"
+							else:
+								message = f"Let me {tool_natural}"
+					
+					# Fallback to reasoning if nothing else available (but make it less technical)
+					if not message and reasoning and reasoning.strip():
+						reasoning_clean = reasoning.strip()
+						# Remove technical details
+						if 'element' in reasoning_clean.lower() or 'index=' in reasoning_clean.lower():
+							# Skip overly technical reasoning
+							message = "Let me proceed with the next step"
+						else:
+							reasoning_clean = reasoning_clean.replace('Step ', '').strip()
+							message = f"Let me {reasoning_clean.lower()}"
+					
+					if message:
+						logger.info(f'🔊 Step {step} (before): {message}')
+						asyncio.create_task(self._send_to_tts(message))
+				
+				elif phase == 'after':
+					# After executing: explain what happened
+					parts = []
+					
+					# Add narration about what happened
+					if narration and narration.strip():
+						parts.append(narration.strip())
+					
+					# Add tool result if available and meaningful
+					if tool and tool.strip():
+						if '→' in tool:
+							# Tool result format: "tool → result"
+							tool_part, result_part = tool.split('→', 1)
+							tool_part = tool_part.strip()
+							result_part = result_part.strip()
+							
+							tool_natural = tool_to_natural(tool_part)
+							if tool_natural and result_part:
+								if len(result_part) > 100:
+									result_part = result_part[:100] + '...'
+								parts.append(f"{tool_natural}, and {result_part}")
+						elif tool not in {'Task completed', 'Awaiting user input'}:
+							tool_natural = tool_to_natural(tool)
+							if tool_natural:
+								parts.append(f"Finished {tool_natural}")
+					
+					if parts:
+						message = join_naturally(parts)
+						logger.info(f'🔊 Step {step} (after): {message}')
+						asyncio.create_task(self._send_to_tts(message))
 
 			# Temporarily set callbacks
 			original_narration = self.integration.narration_callback

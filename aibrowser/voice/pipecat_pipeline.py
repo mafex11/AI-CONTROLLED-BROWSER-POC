@@ -11,6 +11,8 @@ from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineTask
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
@@ -129,15 +131,20 @@ class VoicePipeline:
 	async def initialize(self) -> bool:
 		"""Initialize the pipeline components."""
 		try:
-			# Create local audio transport
-			logger.info('📋 Creating LocalAudioTransport...')
+			# Create local audio transport with VAD configured for 2-second pause
+			logger.info('📋 Creating LocalAudioTransport with VAD (2s pause threshold)...')
 			try:
+				# Configure VAD to wait 2 seconds of silence before finalizing transcription
+				vad_params = VADParams(stop_secs=2.0)
+				vad_analyzer = SileroVADAnalyzer(params=vad_params)
+				
 				transport_params = LocalAudioTransportParams(
 					audio_in_enabled=True,
 					audio_out_enabled=True,
+					vad_analyzer=vad_analyzer,
 				)
 				transport = LocalAudioTransport(transport_params)
-				logger.info('✅ LocalAudioTransport created')
+				logger.info('✅ LocalAudioTransport created with VAD (stop_secs=2.0)')
 			except Exception as e:
 				logger.error('Failed to create LocalAudioTransport: %s', e, exc_info=True)
 				return False
