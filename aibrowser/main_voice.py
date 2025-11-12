@@ -63,48 +63,22 @@ async def voice_loop(integration: BrowserUseIntegration) -> None:
 		print('Failed to initialize voice pipeline.')
 		sys.exit(1)
 
-	# Start pipeline
-	started = False
+	# Run pipeline - this will block until cancelled
 	try:
-		await pipeline.start()
-		started = True
 		print('Voice pipeline started. Listening...\n')
+		print('🎤 Speak your browser task. Say "exit" or "quit" to stop.\n')
 		
-		# The pipeline task needs to be running for audio to capture
-		# Wait a moment for pipeline to initialize
-		await asyncio.sleep(1.0)
-		logger.info('Pipeline task should be running now. Audio capture should be active.')
-
-		# Keep running until interrupted
-		# The pipeline task runs in the background, so we just need to keep the main loop alive
-		try:
-			while True:
-				await asyncio.sleep(1)
-				# Check if run task is still alive
-				if hasattr(pipeline, '_run_task') and pipeline._run_task:
-					if pipeline._run_task.done():
-						logger.warning('Pipeline run task completed unexpectedly!')
-						# Check if it was cancelled or completed with error
-						try:
-							await pipeline._run_task
-						except asyncio.CancelledError:
-							logger.error('Pipeline run task was cancelled!')
-						except Exception as e:
-							logger.error('Pipeline run task failed: %s', e, exc_info=True)
-						break
-		except KeyboardInterrupt:
-			print('\nStopping voice pipeline...')
+		# Run the pipeline (blocks until cancelled)
+		await pipeline.run()
+	except KeyboardInterrupt:
+		print('\nStopping voice pipeline...')
 	except Exception as e:
 		logger.error('Error in voice loop: %s', e, exc_info=True)
-		# Only stop if we actually started
-		if started:
-			await pipeline.stop()
 		raise
 	finally:
-		# Only stop if we actually started
-		if started:
-			await pipeline.stop()
-			print('Voice pipeline stopped.')
+		# Clean up
+		await pipeline.stop()
+		print('Voice pipeline stopped.')
 
 
 async def main() -> None:

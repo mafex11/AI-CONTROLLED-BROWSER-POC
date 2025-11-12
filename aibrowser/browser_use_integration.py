@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def _quiet_browser_use_logs() -> None:
+	"""Suppress noisy browser-use logs, including EventBus capacity errors."""
 	for name, level in {
 		'httpx': logging.WARNING,
 		'cdp_use': logging.WARNING,
@@ -28,8 +29,26 @@ def _quiet_browser_use_logs() -> None:
 		'browser_use.observability': logging.WARNING,
 		'browser_use.tools.service': logging.WARNING,
 		'browser_use.BrowserSession': logging.INFO,
+		'browser_use.browser.watchdogs.aboutblank_watchdog': logging.WARNING,  # Suppress EventBus capacity errors
+		'bubus': logging.WARNING,  # Suppress EventBus capacity warnings
 	}.items():
 		logging.getLogger(name).setLevel(level)
+	
+	# Add a custom filter to suppress EventBus capacity errors
+	class EventBusCapacityFilter(logging.Filter):
+		"""Filter out EventBus capacity errors from AboutBlankWatchdog."""
+		def filter(self, record: logging.LogRecord) -> bool:
+			# Suppress EventBus capacity errors
+			if 'EventBus at capacity' in record.getMessage():
+				return False
+			if 'Error injecting DVD screensaver' in record.getMessage():
+				return False
+			return True
+	
+	# Apply filter to browser_use loggers
+	for logger_name in ['browser_use.browser.watchdogs.aboutblank_watchdog', 'bubus']:
+		logger = logging.getLogger(logger_name)
+		logger.addFilter(EventBusCapacityFilter())
 
 
 @dataclass
