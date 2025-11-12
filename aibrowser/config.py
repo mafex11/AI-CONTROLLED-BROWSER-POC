@@ -64,11 +64,28 @@ class Config:
 		'If the task completes without further browser actions, say so explicitly.'
 	)
 
+	# Voice integration settings
+	ELEVENLABS_API_KEY: str = os.getenv('ELEVENLABS_API_KEY', '')
+	DEEPGRAM_API_KEY: str = os.getenv('DEEPGRAM_API_KEY', '')
+	ELEVENLABS_VOICE_ID: str = os.getenv('ELEVENLABS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM')  # Default: Rachel
+	DEEPGRAM_LANGUAGE: str = os.getenv('DEEPGRAM_LANGUAGE', 'en-US')
+
 	@classmethod
 	def validate(cls) -> bool:
 		"""Ensure required keys exist before running."""
 		if cls.LLM_PROVIDER == 'gemini' and not cls.GEMINI_API_KEY:
 			logger.error('Missing GEMINI_API_KEY. Set it in your environment.')
+			return False
+		return True
+
+	@classmethod
+	def validate_voice(cls) -> bool:
+		"""Validate voice integration API keys."""
+		if not cls.ELEVENLABS_API_KEY:
+			logger.error('Missing ELEVENLABS_API_KEY. Set it in your environment.')
+			return False
+		if not cls.DEEPGRAM_API_KEY:
+			logger.error('Missing DEEPGRAM_API_KEY. Set it in your environment.')
 			return False
 		return True
 
@@ -104,4 +121,7 @@ class Config:
 				else 'default'
 			)
 		)
+		if cls.ELEVENLABS_API_KEY or cls.DEEPGRAM_API_KEY:
+			print(f'  ElevenLabs API Key: {"set" if bool(cls.ELEVENLABS_API_KEY) else "missing"}')
+			print(f'  Deepgram API Key: {"set" if bool(cls.DEEPGRAM_API_KEY) else "missing"}')
 
