@@ -30,6 +30,7 @@ class AgentBridge:
 		self._processing = False
 		self._current_task: Optional[asyncio.Task] = None
 		self._tts_processor = None
+		self._speech_tracker = None
 
 	async def process_user_text(self, text: str) -> None:
 		"""Process user speech transcript and run agent."""
@@ -78,14 +79,19 @@ class AgentBridge:
 	async def _run_agent(self, query: str) -> None:
 		"""Run the agent and send responses to TTS."""
 		try:
-			# Create narration callback that sends to TTS
+			# Disable narration callback - we'll use step_callback only to avoid duplicates
 			def narration_callback(narration: str) -> None:
-				if narration and narration.strip():
-					asyncio.create_task(self._send_to_tts(narration.strip()))
+				# Don't send narrations to TTS here - step_callback handles it
+				pass
 
+			# Track what we've already sent to avoid duplicates
+			_last_tts_message = ''
+			
 			# Create step callback for step-by-step narration
-			def step_callback(step: int, reasoning: str, narration: str, tool: str, phase: str) -> None:
+			async def step_callback(step: int, reasoning: str, narration: str, tool: str, phase: str) -> None:
 				"""Handle step callbacks with detailed, conversational narration."""
+				nonlocal _last_tts_message
+				
 				# Helper function to convert tool to natural language
 				def tool_to_natural(t: str) -> str:
 					if not t or not t.strip():
@@ -154,123 +160,128 @@ class AgentBridge:
 						return "taking a screenshot"
 					return t_lower.replace('_', ' ').replace('()', '')
 				
-				# Helper function to join parts naturally
-				def join_naturally(parts_list: list[str]) -> str:
-					parts_list = [p.strip() for p in parts_list if p and p.strip()]
-					if not parts_list:
-						return ''
-					if len(parts_list) == 1:
-						return parts_list[0]
-					if len(parts_list) == 2:
-						return f"{parts_list[0]}. {parts_list[1]}"
-					all_but_last = ', '.join(parts_list[:-1])
-					return f"{all_but_last}, and {parts_list[-1]}"
-				
+				# Print step information to terminal
+				# step_callback receives: (step, reasoning, agent_response, action, phase)
+				# - reasoning: WHY (from thinking + state)
+				# - agent_response: WHAT agent says (narration before, result after)
+				# - action: WHAT tool is executing
 				if phase == 'before':
-					# Before executing: explain what we're about to do in natural language
-					# Prioritize narration (agent's natural explanation) over technical reasoning
+					# Print step information to terminal
+					print(f'\n{"="*60}')
+					print(f'Step {step}')
+					print(f'{"="*60}')
+					if reasoning:
+						print(f'Reasoning: {reasoning[:200]}{"..." if len(reasoning) > 200 else ""}')
+					if narration:
+						print(f'Agent Response: {narration}')
+					if tool:
+						print(f'Action: {tool}')
+					print(f'{"="*60}')
+					
+					# Send TTS BEFORE executing action - use agent_response (what agent SAYS it will do)
+					# This is the narration from LLM, which should be action-oriented, not reasoning
 					message = None
 					
-					# First, use narration if available (this is the agent's natural explanation)
 					if narration and narration.strip():
-						narration_clean = narration.strip()
-						# Make it sound more conversational if it doesn't already
-						if not narration_clean.lower().startswith(('let me', 'i\'ll', 'i will', 'i\'m going to', 'i need to')):
-							message = f"Let me {narration_clean.lower()}"
-						else:
-							message = narration_clean
+						# Remove periods/full stops to prevent ElevenLabs from stopping mid-sentence
+						# ElevenLabs may pause at periods, breaking the flow
+						message = narration.strip().replace('.', '').replace('?', '').replace('!', '')
+						# Add single period at the end if the original had punctuation
+						if narration.strip()[-1] in '.?!':
+							message += '.'
 					
-					# If no narration, convert tool to natural high-level action
-					if not message and tool and tool.strip() and tool not in {'Task completed', 'Awaiting user input'}:
-						tool_natural = tool_to_natural(tool)
-						if tool_natural:
-							# Make it conversational
-							if tool_natural.startswith('searching'):
-								# Extract query for better narration
+					# Only send if we have a meaningful message and it's different from last
+					if message and message != _last_tts_message:
+						# Filter out JSON/technical content
+						if not (message.startswith('{') or message.startswith('[') or 'index=' in message.lower()):
+							logger.info(f'🔊 Step {step} (before): {message}')
+							_last_tts_message = message
+							# Send TTS and wait for speech completion before allowing action to execute
+							await self._send_to_tts(message)
+							# Wait for speech to finish before executing the action
+							if self._speech_tracker:
 								try:
-									if 'for \'' in tool_natural:
-										query = tool_natural.split('for \'')[1].split('\'')[0]
-										message = f"Let me search for {query}"
-									else:
-										message = "Let me search"
-								except:
-									message = "Let me search"
-							elif tool_natural.startswith('navigating'):
-								# Extract domain for better narration
-								if 'to ' in tool_natural:
-									domain = tool_natural.split('to ')[1]
-									message = f"Let me navigate to {domain}"
-								else:
-									message = "Let me navigate to the page"
-							elif tool_natural.startswith('clicking'):
-								message = "Let me click on that"
-							elif tool_natural.startswith('typing'):
-								message = "Let me type that in"
-							elif tool_natural.startswith('scrolling'):
-								message = "Let me scroll down"
-							else:
-								message = f"Let me {tool_natural}"
+									logger.debug(f'Waiting for speech to complete before executing action...')
+									await self._speech_tracker.wait_for_speech_completion(timeout=30.0)
+									logger.debug(f'Speech completed, action can now execute')
+								except Exception as e:
+									logger.warning(f'Error waiting for speech completion: {e}')
+									# Continue anyway - don't block if there's an error
 					
-					# Fallback to reasoning if nothing else available (but make it less technical)
-					if not message and reasoning and reasoning.strip():
-						reasoning_clean = reasoning.strip()
-						# Remove technical details
-						if 'element' in reasoning_clean.lower() or 'index=' in reasoning_clean.lower():
-							# Skip overly technical reasoning
-							message = "Let me proceed with the next step"
-						else:
-							reasoning_clean = reasoning_clean.replace('Step ', '').strip()
-							message = f"Let me {reasoning_clean.lower()}"
-					
-					if message:
-						logger.info(f'🔊 Step {step} (before): {message}')
-						asyncio.create_task(self._send_to_tts(message))
-				
+					return
 				elif phase == 'after':
-					# After executing: explain what happened
-					parts = []
+					# Print result to terminal
+					if narration:
+						print(f'Agent Response: {narration}')
+					if tool:
+						print(f'Action Result: {tool[:200]}{"..." if len(tool) > 200 else ""}')
+					print(f'{"="*60}\n')
 					
-					# Add narration about what happened
-					if narration and narration.strip():
-						parts.append(narration.strip())
-					
-					# Add tool result if available and meaningful
-					if tool and tool.strip():
-						if '→' in tool:
-							# Tool result format: "tool → result"
-							tool_part, result_part = tool.split('→', 1)
-							tool_part = tool_part.strip()
-							result_part = result_part.strip()
-							
-							tool_natural = tool_to_natural(tool_part)
-							if tool_natural and result_part:
-								if len(result_part) > 100:
-									result_part = result_part[:100] + '...'
-								parts.append(f"{tool_natural}, and {result_part}")
-						elif tool not in {'Task completed', 'Awaiting user input'}:
-							tool_natural = tool_to_natural(tool)
-							if tool_natural:
-								parts.append(f"Finished {tool_natural}")
-					
-					if parts:
-						message = join_naturally(parts)
-						logger.info(f'🔊 Step {step} (after): {message}')
-						asyncio.create_task(self._send_to_tts(message))
+					# Send TTS AFTER executing action ONLY for task completion steps
+					# Regular action steps don't need after-action TTS (already spoke in "before" phase)
+					if tool and 'Task completed' in tool:
+						# This is a task completion step - send TTS for the final result
+						logger.debug(f'🔍 Task completed detected, tool="{tool}", narration="{narration}"')
+						message = None
+						
+						if narration and narration.strip():
+							# Clean up the message for TTS
+							message = narration.strip().replace('.', '').replace('?', '').replace('!', '')
+							# Add single period at the end if the original had punctuation
+							if narration.strip()[-1] in '.?!':
+								message += '.'
+						
+						logger.debug(f'🔍 Processed message="{message}", last_message="{_last_tts_message}", are_equal={message == _last_tts_message if message else False}')
+						
+						# Only send if we have a meaningful message and it's different from last
+						if message and message != _last_tts_message:
+							# Filter out JSON/technical content
+							if not (message.startswith('{') or message.startswith('[') or 'index=' in message.lower()):
+								logger.info(f'🔊 Step {step} (after - task completed): {message}')
+								# Reset last message to allow this one through (it's different content)
+								# But first check if it's really different from what we said in "before" phase
+								old_last_message = _last_tts_message
+								_last_tts_message = message
+								# Send TTS for the final result (task completion message)
+								logger.debug(f'🔊 About to send TTS message: "{message}"')
+								try:
+									await self._send_to_tts(message)
+									logger.debug(f'🔊 TTS message sent successfully, waiting for speech...')
+								except Exception as e:
+									logger.error(f'❌ Error sending TTS message: {e}', exc_info=True)
+									# Don't re-raise - we don't want to break the agent flow
+								# Wait for speech to complete so user hears the completion message
+								if self._speech_tracker:
+									try:
+										logger.debug(f'Waiting for speech to complete after task completion...')
+										await self._speech_tracker.wait_for_speech_completion(timeout=30.0)
+										logger.debug(f'Speech completed after task completion')
+									except Exception as e:
+										logger.warning(f'Error waiting for speech completion: {e}')
+										# Continue anyway - don't block if there's an error
+							else:
+								logger.debug(f'🔍 Message filtered out due to JSON/technical content: "{message}"')
+						else:
+							logger.debug(f'🔍 Message not sent: message={message is not None}, different={message != _last_tts_message if message else False}')
+					else:
+						logger.debug(f'🔍 Not a task completion step: tool="{tool}"')
 
 			# Temporarily set callbacks
 			original_narration = self.integration.narration_callback
 			original_step = self.integration.step_callback
 
-			self.integration.narration_callback = narration_callback
-			self.integration.step_callback = step_callback
+			self.integration.update_callbacks(
+				narration_callback=narration_callback,
+				step_callback=step_callback,
+			)
 
 			try:
 				# Run the agent
 				result = await self.integration.run(query)
 
-				# Send final message to TTS
-				if result.get('message'):
-					await self._send_to_tts(result['message'])
+				# DO NOT send final message to TTS - step_callback already handles all TTS
+				# The "before" phase of step_callback already narrates for task completion
+				# Final message is for terminal display only, not TTS
 
 				if self.on_agent_response:
 					try:
@@ -280,8 +291,10 @@ class AgentBridge:
 
 			finally:
 				# Restore original callbacks
-				self.integration.narration_callback = original_narration
-				self.integration.step_callback = original_step
+				self.integration.update_callbacks(
+					narration_callback=original_narration,
+					step_callback=original_step,
+				)
 
 		except asyncio.CancelledError:
 			logger.info('Agent task cancelled')
@@ -296,22 +309,38 @@ class AgentBridge:
 	def set_tts_processor(self, processor) -> None:
 		"""Set the TTS processor for sending text to speech."""
 		self._tts_processor = processor
+	
+	def set_speech_tracker(self, tracker) -> None:
+		"""Set the speech tracker for waiting for speech completion."""
+		self._speech_tracker = tracker
 
 	async def _send_to_tts(self, text: str) -> None:
 		"""Send text to TTS processor."""
 		if not text or not text.strip():
+			logger.debug('🔍 _send_to_tts: Empty text, skipping')
 			return
-		if self._tts_processor:
-			try:
-				# Use the send_text method if available
-				if hasattr(self._tts_processor, 'send_text'):
-					await self._tts_processor.send_text(text.strip())
-				else:
-					# Fallback: push TextFrame directly to processor
-					from pipecat.frames.frames import TextFrame
-					await self._tts_processor.push_frame(TextFrame(text=text.strip()), FrameDirection.DOWNSTREAM)
-			except Exception as e:
-				logger.error('Error sending text to TTS: %s', e, exc_info=True)
+		
+		if not self._tts_processor:
+			logger.warning('🔍 _send_to_tts: No TTS processor set')
+			return
+		
+		logger.debug(f'🔍 _send_to_tts: Sending text to TTS processor: "{text[:100]}{"..." if len(text) > 100 else ""}"')
+		
+		try:
+			# Use the send_text method if available
+			if hasattr(self._tts_processor, 'send_text'):
+				logger.debug(f'🔍 _send_to_tts: Using send_text method')
+				await self._tts_processor.send_text(text.strip())
+				logger.debug(f'🔍 _send_to_tts: send_text completed successfully')
+			else:
+				logger.debug(f'🔍 _send_to_tts: Using push_frame fallback')
+				# Fallback: push TextFrame directly to processor
+				from pipecat.frames.frames import TextFrame
+				await self._tts_processor.push_frame(TextFrame(text=text.strip()), FrameDirection.DOWNSTREAM)
+				logger.debug(f'🔍 _send_to_tts: push_frame completed successfully')
+		except Exception as e:
+			logger.error('❌ Error sending text to TTS: %s', e, exc_info=True)
+			raise  # Re-raise to see the full error
 
 	def is_processing(self) -> bool:
 		"""Check if agent is currently processing."""

@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Coroutine, Dict, List, Optional, Union
 
 from browser_use.llm.messages import AssistantMessage, BaseMessage, SystemMessage, UserMessage
 
@@ -47,7 +47,7 @@ class DirectBrowserAgent:
 		answer_builder: AnswerPromptBuilder,
 		config: AgentRunConfig,
 		narration_callback: Callable[[str], None] | None = None,
-		step_callback: Callable[[int, str, str, str, str], None] | None = None,
+		step_callback: Callable[[int, str, str, str, str], None] | Callable[[int, str, str, str, str], Coroutine[Any, Any, None]] | None = None,
 	) -> None:
 		self.controller = controller
 		self.llm = llm
@@ -68,7 +68,9 @@ class DirectBrowserAgent:
 		self._context_log.clear()
 
 		try:
+			logger.debug('Fetching initial browser state for new query...')
 			state = await self.controller.refresh_state(include_dom=True, include_screenshot=False)
+			logger.debug('Initial browser state retrieved (URL: %s)', state.url if state else 'unknown')
 		except Exception as error:  # noqa: BLE001
 			logger.error('Failed to get initial browser state: %s', error, exc_info=True)
 			return AgentRunResult(
@@ -196,32 +198,46 @@ class DirectBrowserAgent:
 			action_type = action_payload.get('type', '').lower()
 			
 			# Only call step callback after we have valid structured response
-			# Extract narration for step callback (prefer Narration section, fallback to Result)
-			narration_text = structured.narration[-1] if structured.narration else ''
-			if not narration_text and structured.results:
-				narration_text = structured.results[-1]
-			if not narration_text:
-				narration_text = 'Preparing to execute action...'
+			# Extract agent response: Narration is what the agent SAYS it's doing (before action)
+			# Result is what the agent SAYS happened (after action)
+			agent_response_text = structured.narration[-1] if structured.narration else ''
+			if not agent_response_text:
+				# Fallback: use Result if Narration is empty
+				agent_response_text = structured.results[-1] if structured.results else ''
+			if not agent_response_text:
+				agent_response_text = 'Preparing to execute action...'
 			
-			# Format reasoning from browser state (pass state object for detailed page info)
+			# Extract reasoning: from Thinking section + state analysis (separate from narration)
 			reasoning_text = self._extract_reasoning_from_state(current_observation, structured, state=state)
 			
 			# Format tool execution info
 			tool_info = self._format_tool_info(action_type, action_payload)
 			
 			# Call step callback BEFORE execution (shows what we're about to do)
-			# Only call if we have valid data
-			if self.step_callback and narration_text and tool_info:
+			# Pass: step, reasoning, agent_response (narration), action (tool)
+			if self.step_callback and agent_response_text and tool_info:
 				try:
-					self.step_callback(step, reasoning_text, narration_text, tool_info, 'before')
+					result = self.step_callback(step, reasoning_text, agent_response_text, tool_info, 'before')
+					# Await if callback is async
+					if asyncio.iscoroutine(result):
+						await result
 				except Exception as callback_error:  # noqa: BLE001
 					logger.warning('Step callback error: %s', callback_error)
 			
 			if action_type in {'none', 'done'}:
 				final_text = self._select_final_message(structured)
 				full = self._format_structured(structured)
+				# For completion, use Result as agent response (what agent says happened)
+				completion_response = structured.results[-1] if structured.results else agent_response_text
+				if not completion_response:
+					completion_response = 'Task completed.'
 				if self.step_callback:
-					self.step_callback(step, reasoning_text, narration_text, 'Task completed', 'after')
+					try:
+						result = self.step_callback(step, reasoning_text, completion_response, 'Task completed', 'after')
+						if asyncio.iscoroutine(result):
+							await result
+					except Exception as callback_error:  # noqa: BLE001
+						logger.warning('Step callback error: %s', callback_error)
 				return AgentRunResult(
 					success=True,
 					awaiting_user_input=False,
@@ -234,8 +250,17 @@ class DirectBrowserAgent:
 			if action_type in {'await_user_input', 'awaiting_user_input'}:
 				final_text = self._select_final_message(structured)
 				full = self._format_structured(structured)
+				# For user input requests, use Result as agent response
+				await_response = structured.results[-1] if structured.results else agent_response_text
+				if not await_response:
+					await_response = 'I need your input to continue.'
 				if self.step_callback:
-					self.step_callback(step, reasoning_text, narration_text, 'Awaiting user input', 'after')
+					try:
+						result = self.step_callback(step, reasoning_text, await_response, 'Awaiting user input', 'after')
+						if asyncio.iscoroutine(result):
+							await result
+					except Exception as callback_error:  # noqa: BLE001
+						logger.warning('Step callback error: %s', callback_error)
 				return AgentRunResult(
 					success=False,
 					awaiting_user_input=True,
@@ -245,25 +270,47 @@ class DirectBrowserAgent:
 					context_log=list(self._context_log),
 				)
 
+			# Execute action using the state that was shown to the LLM
+			# browser-use Tools will use the cached selector_map which matches the indices
+			# the LLM saw. Do NOT refresh state here as it would create new backend_node_ids
+			# and break the element lookup.
 			result_str = await self._execute_action(action_type, action_payload)
 			self._context_log.append(result_str)
 			self._context_log = self._context_log[-20:]
 			
 			# Call step callback AFTER execution (shows result)
+			# Use Result as agent response (what agent says happened)
+			after_response = structured.results[-1] if structured.results else agent_response_text
+			if not after_response:
+				after_response = f'{tool_info} → {result_str[:50]}'
 			if self.step_callback:
 				try:
 					result_summary = result_str[:100] + '...' if len(result_str) > 100 else result_str
-					self.step_callback(step, reasoning_text, narration_text, f'{tool_info} → {result_summary}', 'after')
+					callback_result = self.step_callback(step, reasoning_text, after_response, f'{tool_info} → {result_summary}', 'after')
+					# Await if callback is async
+					if asyncio.iscoroutine(callback_result):
+						await callback_result
 				except Exception as callback_error:  # noqa: BLE001
 					logger.warning('Step callback error (after): %s', callback_error)
 
-			# Refresh state for next loop
+			# Wait for page to stabilize after action (dynamic content may need time to load)
+			# Reduced delay for faster response - browser-use Tools handle their own timing
+			wait_time = 0.5
+			logger.debug('Waiting %.1fs for page to stabilize before refreshing state...', wait_time)
+			await asyncio.sleep(wait_time)
+			
+			# Refresh state for next loop - this fetches the latest DOM from the browser
+			# browser-use Tools handle their own state refresh internally, but we refresh here
+			# to ensure the LLM sees the current state at the start of the next step
+			logger.debug('Refreshing browser state to get latest page content...')
+			try:
+				state = await self.controller.refresh_state(include_dom=True, include_screenshot=False)
+				logger.debug('Browser state refreshed successfully (URL: %s)', state.url if state else 'unknown')
+			except Exception as error:  # noqa: BLE001
+				logger.warning('Failed to refresh browser state: %s', error)
+				# Try once more after a short delay
 			await asyncio.sleep(0.5)
 			state = await self.controller.refresh_state(include_dom=True, include_screenshot=False)
-			
-			# Delay between steps to reduce API load and avoid overload
-			logger.debug('Waiting 10 seconds before next step to reduce API load...')
-			await asyncio.sleep(10.0)
 
 		return AgentRunResult(
 			success=False,
@@ -342,12 +389,9 @@ class DirectBrowserAgent:
 				keys = payload.get('keys', '')
 				result = await self.controller.send_keys(keys)
 				return result.extracted_content or f'Sent keys: {keys}.'
-			# Screenshot functionality commented out
-			# if action_type == 'screenshot':
-			# 	result = await self.controller.screenshot()
-			# 	return result.extracted_content or 'Captured screenshot.'
 			if action_type == 'screenshot':
-				return 'Screenshot functionality is disabled.'
+				result = await self.controller.screenshot()
+				return result.extracted_content or 'Captured screenshot.'
 			return f'Unsupported action type: {action_type}'
 		except Exception as error:  # noqa: BLE001
 			logger.error('Action execution failed: %s', error, exc_info=True)
@@ -508,11 +552,8 @@ class DirectBrowserAgent:
 		elif action_type == 'send_keys':
 			keys = payload.get('keys', '')
 			return f"send_keys(keys='{keys}')"
-		# Screenshot functionality commented out
-		# elif action_type == 'screenshot':
-		# 	return "screenshot()"
 		elif action_type == 'screenshot':
-			return "screenshot() [disabled]"
+			return "screenshot()"
 		elif action_type == 'await_user_input':
 			return "await_user_input()"
 		elif action_type == 'none':

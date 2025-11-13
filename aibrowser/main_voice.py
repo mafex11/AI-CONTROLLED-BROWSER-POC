@@ -73,7 +73,7 @@ async def voice_loop(integration: BrowserUseIntegration) -> None:
 	except KeyboardInterrupt:
 		print('\nStopping voice pipeline...')
 	except Exception as e:
-		logger.error('Error in voice loop: %s', e, exc_info=True)
+		LOGGER.error('Error in voice loop: %s', e, exc_info=True)
 		raise
 	finally:
 		# Clean up

@@ -19,6 +19,9 @@ from .structured_prompt import AnswerPromptBuilder, ObservationPromptBuilder, St
 logger = logging.getLogger(__name__)
 
 
+_CALLBACK_SENTINEL = object()
+
+
 def _quiet_browser_use_logs() -> None:
 	"""Suppress noisy browser-use logs, including EventBus capacity errors."""
 	for name, level in {
@@ -139,6 +142,22 @@ class BrowserUseIntegration:
 			payload['final_url'] = getattr(result.final_state, 'url', None)
 			payload['final_title'] = getattr(result.final_state, 'title', None)
 		return payload
+
+	def update_callbacks(
+		self,
+		*,
+		narration_callback=_CALLBACK_SENTINEL,
+		step_callback=_CALLBACK_SENTINEL,
+	) -> None:
+		"""Update integration and agent callbacks at runtime."""
+		if not self._initialized or not self._state:
+			return
+		if narration_callback is not _CALLBACK_SENTINEL:
+			self.narration_callback = narration_callback
+			self._state.agent.narration_callback = narration_callback
+		if step_callback is not _CALLBACK_SENTINEL:
+			self.step_callback = step_callback
+			self._state.agent.step_callback = step_callback
 
 	async def shutdown(self) -> None:
 		if self._state:
