@@ -86,11 +86,12 @@ class AgentBridge:
 
 			# Track what we've already sent to avoid duplicates
 			_last_tts_message = ''
+			_step_counter = 0
 			
 			# Create step callback for step-by-step narration
 			async def step_callback(step: int, reasoning: str, narration: str, tool: str, phase: str) -> None:
 				"""Handle step callbacks with detailed, conversational narration."""
-				nonlocal _last_tts_message
+				nonlocal _last_tts_message, _step_counter
 				
 				# Helper function to convert tool to natural language
 				def tool_to_natural(t: str) -> str:
@@ -166,6 +167,7 @@ class AgentBridge:
 				# - agent_response: WHAT agent says (narration before, result after)
 				# - action: WHAT tool is executing
 				if phase == 'before':
+					_step_counter += 1
 					# Print step information to terminal
 					print(f'\n{"="*60}')
 					print(f'Step {step}')
@@ -217,9 +219,15 @@ class AgentBridge:
 						print(f'Action Result: {tool[:200]}{"..." if len(tool) > 200 else ""}')
 					print(f'{"="*60}\n')
 					
-					# Send TTS AFTER executing action ONLY for task completion steps
-					# Regular action steps don't need after-action TTS (already spoke in "before" phase)
+					# Send TTS AFTER executing action ONLY for task completion steps.
+					# For single-step tasks we only speak the before-phase response, but for multi-step
+					# tasks we also speak the final after-phase summary.
 					if tool and 'Task completed' in tool:
+						if _step_counter <= 1:
+							logger.debug(
+								'🔍 Task completed but only one step detected; skipping after-phase TTS to keep single-step responses brief'
+							)
+							return
 						# This is a task completion step - send TTS for the final result
 						logger.debug(f'🔍 Task completed detected, tool="{tool}", narration="{narration}"')
 						message = None
