@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-# Load environment variables from .env if present
 load_dotenv()
 
 
@@ -64,7 +63,6 @@ class Config:
 		'If the task completes without further browser actions, say so explicitly.'
 	)
 
-	# Voice integration settings
 	ELEVENLABS_API_KEY: str = os.getenv('ELEVENLABS_API_KEY', '')
 	DEEPGRAM_API_KEY: str = os.getenv('DEEPGRAM_API_KEY', '')
 	ELEVENLABS_VOICE_ID: str = os.getenv('ELEVENLABS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM')  # Default: Rachel

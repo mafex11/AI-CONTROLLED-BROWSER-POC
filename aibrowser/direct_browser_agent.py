@@ -65,22 +65,15 @@ class DirectBrowserAgent:
 	async def run(self, task: str) -> AgentRunResult:
 		logger.debug('Starting agent task: %s', task)
 		system_prompt = self.system_prompt_builder.build()
-		# Keep conversation history for session context - only clear per-run context log
-		# self._conversation.clear()  # Removed to maintain session memory
 		self._context_log.clear()
 		
-		# Add user task to conversation history if this is a new user query
-		# Only add if conversation is empty or last message was from assistant
 		if self._conversation:
 			last_message = self._conversation[-1]
 			if isinstance(last_message, AssistantMessage):
-				# Last message was from assistant, so this is a new user query
 				logger.debug('Adding new user task to conversation history')
 			elif isinstance(last_message, UserMessage):
-				# Last message was from user, don't duplicate
 				logger.debug('Last message was user message, not adding duplicate')
 		else:
-			# First message in conversation
 			logger.debug('Starting new conversation session')
 
 		# Use cached state if available to avoid blocking DOM fetch on task start
@@ -131,7 +124,6 @@ class DirectBrowserAgent:
 				user_message = UserMessage(content=observation)
 				messages.append(user_message)
 				
-				# Store observation for step callback (reasoning)
 				current_observation = tab_summary
 			except Exception as error:  # noqa: BLE001
 				logger.error('Error preparing step %d: %s', step, error, exc_info=True)
@@ -145,7 +137,6 @@ class DirectBrowserAgent:
 				)
 
 			try:
-				# Add timeout to prevent hanging, with exponential backoff for 503 errors
 				response_text = None
 				last_error = None
 				max_retries = 3
@@ -153,14 +144,12 @@ class DirectBrowserAgent:
 					try:
 						response = await asyncio.wait_for(self.llm.ainvoke(messages), timeout=60.0)
 						response_text = response.completion if hasattr(response, 'completion') else str(response)
-						break  # Success, exit retry loop
+						break
 					except Exception as error:  # noqa: BLE001
 						last_error = error
 						error_str = str(error)
-						# Check if it's a 503 overload error
 						if '503' in error_str or 'overloaded' in error_str.lower() or 'UNAVAILABLE' in error_str:
 							if retry_attempt < max_retries - 1:
-								# Exponential backoff: 2s, 4s, 8s
 								wait_time = 2.0 * (2 ** retry_attempt)
 								logger.warning(
 									'Gemini API overloaded (503), waiting %ds before retry %d/%d',
@@ -170,7 +159,6 @@ class DirectBrowserAgent:
 								)
 								await asyncio.sleep(wait_time)
 								continue
-						# For other errors or final retry, break and handle below
 						break
 				
 				if response_text is None:
@@ -211,23 +199,13 @@ class DirectBrowserAgent:
 			logger.debug('LLM response (first 200 chars): %s', response_text[:200])
 			assistant_message = AssistantMessage(content=response_text)
 			
-			# Add messages to conversation history
-			# Only add user_message on step 1 (new task), since the observation contains the task
-			# Subsequent steps within the same task are internal agent reasoning
 			if step == 1:
-				# For first step, add the user task/observation message
-				# This represents the new user query
 				self._conversation.append(user_message)
 				logger.debug('Added user task to conversation history: %s', task[:100])
 			
-			# Always add assistant response to conversation history
 			self._conversation.append(assistant_message)
 			
-			# Trim conversation history if it exceeds limit (keep system message equivalent space)
-			# We want to keep the most recent messages while staying within token limits
 			if len(self._conversation) > self._max_conversation_history:
-				# Keep first few messages (system-like context) and most recent
-				# Remove middle messages to stay within limit
 				keep_recent = self._max_conversation_history // 2
 				keep_early = self._max_conversation_history - keep_recent
 				self._conversation = (
@@ -260,19 +238,12 @@ class DirectBrowserAgent:
 
 			action_type = action_payload.get('type', '').lower()
 			
-			# Extract reasoning: from Thinking section + state analysis (separate from narration)
 			reasoning_text = self._extract_reasoning_from_state(current_observation, structured, state=state)
-			
-			# Format tool execution info
 			tool_info = self._format_tool_info(action_type, action_payload)
 			
-			# For "none" and "await_user_input" actions (no browser action to execute), use the final complete result
-			# in the "before" phase since there's no actual action to execute - the response IS the result
 			if action_type in {'none', 'done', 'await_user_input', 'awaiting_user_input'}:
-				# Use the best/final message as the response (includes complete answer)
 				agent_response_text = self._select_final_message(structured)
 				if not agent_response_text:
-					# Fallback to results or narration
 					agent_response_text = structured.results[-1] if structured.results else ''
 					if not agent_response_text:
 						if action_type in {'await_user_input', 'awaiting_user_input'}:
@@ -280,30 +251,23 @@ class DirectBrowserAgent:
 						else:
 							agent_response_text = structured.narration[-1] if structured.narration else 'Task completed.'
 			else:
-				# For actions that will execute, use narration (what agent SAYS it's doing before action)
 				agent_response_text = structured.narration[-1] if structured.narration else ''
 				if not agent_response_text:
-					# Fallback: use Result if Narration is empty
 					agent_response_text = structured.results[-1] if structured.results else ''
 				if not agent_response_text:
 					agent_response_text = 'Preparing to execute action...'
 			
-			# Call step callback BEFORE execution (or completion for "none" actions)
-			# For "none" actions, this contains the complete response since there's no action to execute
 			if self.step_callback and agent_response_text and tool_info:
 				try:
 					result = self.step_callback(step, reasoning_text, agent_response_text, tool_info, 'before')
-					# Await if callback is async
 					if asyncio.iscoroutine(result):
 						await result
 				except Exception as callback_error:  # noqa: BLE001
 					logger.warning('Step callback error: %s', callback_error)
 			
-			# For "none" actions, we're done - the complete response was already sent in "before" phase
 			if action_type in {'none', 'done'}:
 				final_text = self._select_final_message(structured)
 				full = self._format_structured(structured)
-				# No need to call step_callback again - the complete response was already sent above
 				return AgentRunResult(
 					success=True,
 					awaiting_user_input=False,
@@ -313,11 +277,9 @@ class DirectBrowserAgent:
 					context_log=list(self._context_log),
 				)
 
-			# For "await_user_input" actions, we're done - the complete response was already sent in "before" phase
 			if action_type in {'await_user_input', 'awaiting_user_input'}:
 				final_text = self._select_final_message(structured)
 				full = self._format_structured(structured)
-				# No need to call step_callback again - the complete response was already sent above
 				return AgentRunResult(
 					success=False,
 					awaiting_user_input=True,
@@ -344,28 +306,21 @@ class DirectBrowserAgent:
 				try:
 					result_summary = result_str[:100] + '...' if len(result_str) > 100 else result_str
 					callback_result = self.step_callback(step, reasoning_text, after_response, f'{tool_info} → {result_summary}', 'after')
-					# Await if callback is async
 					if asyncio.iscoroutine(callback_result):
 						await callback_result
 				except Exception as callback_error:  # noqa: BLE001
 					logger.warning('Step callback error (after): %s', callback_error)
 
-			# Wait for page to stabilize after action (dynamic content may need time to load)
-			# Reduced delay for faster response - browser-use Tools handle their own timing
-			wait_time = 0.2  # Reduced from 0.5s for faster response
+			wait_time = 0.2
 			logger.debug('Waiting %.1fs for page to stabilize before refreshing state...', wait_time)
 			await asyncio.sleep(wait_time)
 			
-			# Refresh state for next loop - this fetches the latest DOM from the browser
-			# browser-use Tools handle their own state refresh internally, but we refresh here
-			# to ensure the LLM sees the current state at the start of the next step
 			logger.debug('Refreshing browser state to get latest page content...')
 			try:
 				state = await self.controller.refresh_state(include_dom=True, include_screenshot=False)
 				logger.debug('Browser state refreshed successfully (URL: %s)', state.url if state else 'unknown')
 			except Exception as error:  # noqa: BLE001
 				logger.warning('Failed to refresh browser state: %s', error)
-				# Use cached state as fallback instead of waiting and retrying
 				state = self.controller.last_state or state
 
 		return AgentRunResult(
@@ -472,21 +427,18 @@ class DirectBrowserAgent:
 		
 		info_parts = []
 		
-		# Basic page info
 		info_parts.append(f"Page: {state.url}")
 		if state.title and state.title != state.url:
 			info_parts.append(f"Title: {state.title}")
 		
-		# Extract interactive elements information
 		if state.dom_state and hasattr(state.dom_state, 'selector_map'):
 			selector_map = state.dom_state.selector_map
 			if selector_map:
-				# Count different types of elements
 				key_buttons = []
 				key_links = []
 				key_inputs = []
 				
-				for index, element in list(selector_map.items())[:20]:  # Limit to first 20 for performance
+				for index, element in list(selector_map.items())[:20]:
 					tag = element.tag_name.lower() if hasattr(element, 'tag_name') else ''
 					text = ''
 					if hasattr(element, 'get_all_children_text'):
@@ -495,38 +447,33 @@ class DirectBrowserAgent:
 						except Exception:
 							pass
 					
-					# Get attributes for better identification
 					attrs = getattr(element, 'attributes', {})
 					aria_label = attrs.get('aria-label', '').strip()
 					placeholder = attrs.get('placeholder', '').strip()
 					href = attrs.get('href', '').strip()
 					
-					# Identify element type and get display text
 					display_text = text or aria_label or placeholder
 					if not display_text and href:
 						display_text = href.split('/')[-1] or href[:30]
 					if not display_text:
-						continue  # Skip elements with no identifiable text
+						continue
 					
-					# Limit display text length
 					if len(display_text) > 40:
 						display_text = display_text[:37] + '...'
 					
 					if tag == 'button' or 'button' in str(attrs.get('role', '')).lower():
-						if len(key_buttons) < 3:  # Only keep top 3 buttons
+						if len(key_buttons) < 3:
 							key_buttons.append(f"[{index}] {display_text}")
 					elif tag == 'a' or href:
-						if len(key_links) < 3:  # Only keep top 3 links
+						if len(key_links) < 3:
 							key_links.append(f"[{index}] {display_text}")
 					elif tag in ('input', 'textarea'):
-						if len(key_inputs) < 3:  # Only keep top 3 inputs
+						if len(key_inputs) < 3:
 							key_inputs.append(f"[{index}] {display_text}")
 				
-				# Add summary with key visible elements
 				total_interactive = len(selector_map)
 				info_parts.append(f"{total_interactive} interactive elements visible")
 				
-				# Add key visible elements (most important ones)
 				if key_buttons:
 					info_parts.append(f"Key buttons: {', '.join(key_buttons)}")
 				if key_links:
@@ -540,34 +487,28 @@ class DirectBrowserAgent:
 		"""Extract reasoning based on browser state and agent thinking."""
 		reasoning_parts = []
 		
-		# Add thinking/thought sections if available (these come from the LLM)
 		if structured.thinking:
-			thinking_text = ' '.join(structured.thinking[-2:])  # Last 2 thinking entries
+			thinking_text = ' '.join(structured.thinking[-2:])
 			if thinking_text.strip():
 				reasoning_parts.append(thinking_text)
 		
-		# Add evaluate sections if available
 		if structured.evaluate:
-			eval_text = ' '.join(structured.evaluate[-1:])  # Last evaluation
+			eval_text = ' '.join(structured.evaluate[-1:])
 			if eval_text.strip():
 				reasoning_parts.append(f"Evaluation: {eval_text}")
 		
-		# Extract detailed page information from state
 		if state:
 			page_info = self._extract_page_info(state)
 			if page_info and page_info != 'No page state available':
 				reasoning_parts.append(f"Page info: {page_info}")
 		
-		# Fallback to tab_summary if state not available
 		if not state and tab_summary:
 			lines = tab_summary.split('\n')
-			# Get URL
 			url_line = next((line for line in lines if line.startswith('URL:')), None)
 			if url_line:
 				url = url_line.replace('URL:', '').strip()
 				reasoning_parts.append(f"On page: {url}")
 			
-			# Get title if available
 			title_line = next((line for line in lines if line.startswith('Title:')), None)
 			if title_line:
 				title = title_line.replace('Title:', '').strip()

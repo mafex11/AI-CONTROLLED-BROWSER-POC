@@ -20,23 +20,17 @@ LOGGER = logging.getLogger(__name__)
 
 def setup_logging() -> None:
 	"""Configure clean, consistent logging for the application."""
-	# Clean format without timestamps for better readability
 	log_format = '%(levelname)-8s | %(message)s'
 	logging.basicConfig(level=logging.INFO, format=log_format, datefmt='')
 	
-	# Set levels - reduce noise from third-party libraries
-	logging.getLogger('aibrowser').setLevel(logging.INFO)  # Use INFO for cleaner output
+	logging.getLogger('aibrowser').setLevel(logging.INFO)
 	logging.getLogger('asyncio').setLevel(logging.WARNING)
-	
-	# Suppress verbose pipecat logs - only show important messages
 	logging.getLogger('pipecat').setLevel(logging.WARNING)
 	logging.getLogger('pipecat.services.deepgram').setLevel(logging.WARNING)
 	logging.getLogger('pipecat.transports.local').setLevel(logging.WARNING)
 	logging.getLogger('pipecat.audio.vad').setLevel(logging.WARNING)
 	logging.getLogger('pipecat.pipeline').setLevel(logging.WARNING)
 	logging.getLogger('pipecat.processors').setLevel(logging.WARNING)
-	
-	# Suppress other noisy libraries
 	logging.getLogger('httpx').setLevel(logging.WARNING)
 	logging.getLogger('httpcore').setLevel(logging.WARNING)
 
@@ -56,14 +50,12 @@ async def voice_loop(integration: BrowserUseIntegration) -> None:
 		if text:
 			print(f'[Agent] {text}')
 
-	# Create agent bridge
 	agent_bridge = AgentBridge(
 		integration=integration,
 		on_user_speech=on_user_speech,
 		on_agent_response=on_agent_response,
 	)
 
-	# Create voice pipeline with agent bridge
 	pipeline = VoicePipeline(
 		agent_bridge=agent_bridge,
 		deepgram_api_key=Config.DEEPGRAM_API_KEY,
@@ -72,16 +64,12 @@ async def voice_loop(integration: BrowserUseIntegration) -> None:
 		deepgram_language=Config.DEEPGRAM_LANGUAGE,
 	)
 
-	# Initialize pipeline
 	if not await pipeline.initialize():
 		print('Failed to initialize voice pipeline.')
 		sys.exit(1)
 
-	# Run pipeline - this will block until cancelled
 	try:
 		print('Voice pipeline started. Listening...\n')
-		
-		# Run the pipeline (blocks until cancelled)
 		await pipeline.run()
 	except KeyboardInterrupt:
 		print('\nStopping voice pipeline...')
@@ -89,7 +77,6 @@ async def voice_loop(integration: BrowserUseIntegration) -> None:
 		LOGGER.error('Error in voice loop: %s', e, exc_info=True)
 		raise
 	finally:
-		# Clean up
 		await pipeline.stop()
 		print('Voice pipeline stopped.')
 
@@ -97,17 +84,14 @@ async def voice_loop(integration: BrowserUseIntegration) -> None:
 async def main() -> None:
 	setup_logging()
 
-	# Validate basic config
 	if not Config.validate():
 		sys.exit(1)
 
-	# Validate voice config
 	if not Config.validate_voice():
 		sys.exit(1)
 
 	Config.log_config()
 
-	# Setup browser
 	port = int(os.getenv('CHROME_DEBUG_PORT', '9222'))
 	headless = os.getenv('CHROMIUM_HEADLESS', 'false').lower() in {'1', 'true', 'yes', 'on'}
 
@@ -118,7 +102,6 @@ async def main() -> None:
 			print('Failed to start Chromium. Ensure Chrome is installed or Playwright is available.')
 			sys.exit(1)
 
-		# Fetch WebSocket URL from CDP endpoint
 		version_url = f'{manager.endpoint}/json/version'
 		ws_url = None
 		try:
@@ -138,7 +121,6 @@ async def main() -> None:
 			print(f'Failed to verify CDP endpoint: {e}')
 			sys.exit(1)
 
-		# Initialize browser integration
 		integration = BrowserUseIntegration(
 			cdp_url=ws_url,
 			default_search_engine=Config.DEFAULT_SEARCH_ENGINE,
@@ -147,7 +129,6 @@ async def main() -> None:
 			print('Failed to initialize browser-use integration.')
 			sys.exit(1)
 
-		# Run voice loop
 		await voice_loop(integration)
 
 	finally:

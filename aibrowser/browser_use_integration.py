@@ -37,18 +37,15 @@ def _quiet_browser_use_logs() -> None:
 	}.items():
 		logging.getLogger(name).setLevel(level)
 	
-	# Add a custom filter to suppress EventBus capacity errors
 	class EventBusCapacityFilter(logging.Filter):
 		"""Filter out EventBus capacity errors from AboutBlankWatchdog."""
 		def filter(self, record: logging.LogRecord) -> bool:
-			# Suppress EventBus capacity errors
 			if 'EventBus at capacity' in record.getMessage():
 				return False
 			if 'Error injecting DVD screensaver' in record.getMessage():
 				return False
 			return True
 	
-	# Apply filter to browser_use loggers
 	for logger_name in ['browser_use.browser.watchdogs.aboutblank_watchdog', 'bubus']:
 		logger = logging.getLogger(logger_name)
 		logger.addFilter(EventBusCapacityFilter())
@@ -189,10 +186,9 @@ class BrowserUseIntegration:
 			temperature=Config.GEMINI_TEMPERATURE,
 			max_output_tokens=Config.GEMINI_MAX_OUTPUT_TOKENS,
 			top_p=Config.GEMINI_TOP_P,
-			# Better retry settings for 503 overload errors
-			max_retries=5,  # More retries for overloaded service
-			retryable_status_codes=[403, 503, 429],  # Include rate limit errors
-			retry_delay=2.0,  # Longer delay (2 seconds) to give service time to recover
+			max_retries=5,
+			retryable_status_codes=[403, 503, 429],
+			retry_delay=2.0,
 		)
 
 	async def _build_browser_session(self) -> BrowserSession:

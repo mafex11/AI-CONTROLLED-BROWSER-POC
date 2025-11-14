@@ -74,7 +74,6 @@ async def main() -> None:
 			print('Failed to start Chromium. Ensure Chrome is installed or Playwright is available.')
 			sys.exit(1)
 
-		# Fetch WebSocket URL from CDP endpoint
 		version_url = f'{manager.endpoint}/json/version'
 		ws_url = None
 		try:
@@ -94,7 +93,6 @@ async def main() -> None:
 			print(f'Failed to verify CDP endpoint: {e}')
 			sys.exit(1)
 
-		# Step callback to display detailed step information
 		def step_callback(step: int, reasoning: str, narration: str, tool: str, phase: str) -> None:
 			if phase == 'before':
 				print(f'\n{"="*60}')
@@ -110,9 +108,8 @@ async def main() -> None:
 				print(f'\n   Result: {tool}')
 				print(f'{"="*60}')
 		
-		# Pass WebSocket URL directly to avoid BrowserSession fetching it again
 		integration = BrowserUseIntegration(
-			cdp_url=ws_url,  # Pass WebSocket URL directly
+			cdp_url=ws_url,
 			default_search_engine=Config.DEFAULT_SEARCH_ENGINE,
 			step_callback=step_callback,
 		)
