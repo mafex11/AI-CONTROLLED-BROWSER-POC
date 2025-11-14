@@ -27,17 +27,25 @@ from .agent_bridge import AgentBridge
 logger = logging.getLogger(__name__)
 
 
+# Silence configuration for user -> agent transcription
+USER_SILENCE_DELAY_SECONDS = 1.0  # Used for VAD and Deepgram endpointing
+# Minimal buffer delay for TextToAgentProcessor - Deepgram already waits 1s to finalize,
+# so we only need a tiny delay to catch any late-arriving chunks
+TEXT_TO_AGENT_BUFFER_DELAY_SECONDS = 0.05
+
+
 class TextToAgentProcessor(FrameProcessor):
 	"""Processor that takes STT text frames and sends them to the agent bridge.
 	
-	Buffers transcription frames to wait for 2 seconds of silence before processing.
-	This prevents premature task execution when user is still speaking mid-sentence.
+	Buffers transcription frames minimally to catch any late-arriving chunks.
+	Deepgram already waits 1 second of silence before finalizing, so we only need
+	a minimal buffer delay here (0.05s) rather than another full second.
 	"""
 
-	def __init__(self, agent_bridge: AgentBridge, silence_delay: float = 2.0) -> None:
+	def __init__(self, agent_bridge: AgentBridge, silence_delay: float = TEXT_TO_AGENT_BUFFER_DELAY_SECONDS) -> None:
 		super().__init__()
 		self.agent_bridge = agent_bridge
-		self.silence_delay = silence_delay  # Wait 2 seconds of silence before processing
+		self.silence_delay = silence_delay  # Minimal buffer to catch late chunks (Deepgram already endpointed)
 		self._accumulated_transcription: list[str] = []  # Accumulate multiple final transcriptions
 		self._last_final_text: Optional[str] = None  # Track last final transcription text
 		self._transcription_timer: Optional[asyncio.Task] = None
@@ -61,12 +69,12 @@ class TextToAgentProcessor(FrameProcessor):
 			interim_text = frame.text.strip()
 			if interim_text:
 				self._last_interim_text = interim_text
-				logger.debug('🎤 Interim transcription: "%s"', interim_text)
+				logger.debug('Interim transcription: "%s"', interim_text)
 				# Cancel any pending timer - user is still speaking
 				if self._transcription_timer and not self._transcription_timer.done():
 					self._transcription_timer.cancel()
 					self._transcription_timer = None
-					logger.debug('🔄 Cancelled pending transcription timer - user still speaking')
+					logger.debug('Cancelled pending transcription timer - user still speaking')
 		
 		# Handle FINAL TranscriptionFrames - accumulate chunks and wait for silence
 		elif isinstance(frame, TranscriptionFrame) and frame.text:
@@ -79,7 +87,7 @@ class TextToAgentProcessor(FrameProcessor):
 				# (Deepgram may send overlapping chunks, so we check if the new text extends the previous)
 				if self._last_final_text and text.startswith(self._last_final_text):
 					# This is an extension - replace the last chunk with the longer version
-					logger.debug('🎤 Final transcription extended: "%s" -> "%s"', 
+					logger.debug('Final transcription extended: "%s" -> "%s"', 
 						self._last_final_text, text)
 					if self._accumulated_transcription:
 						self._accumulated_transcription[-1] = text
@@ -87,7 +95,7 @@ class TextToAgentProcessor(FrameProcessor):
 						self._accumulated_transcription.append(text)
 				elif self._last_final_text and self._last_final_text in text:
 					# Previous text is contained in new text (new text is longer/supersedes)
-					logger.debug('🎤 Final transcription superseded: "%s" -> "%s"', 
+					logger.debug('Final transcription superseded: "%s" -> "%s"', 
 						self._last_final_text, text)
 					if self._accumulated_transcription:
 						self._accumulated_transcription[-1] = text
@@ -95,7 +103,7 @@ class TextToAgentProcessor(FrameProcessor):
 						self._accumulated_transcription.append(text)
 				else:
 					# New chunk - add it to accumulation
-					logger.debug('🎤 Received final transcription chunk: "%s" (accumulating)', text)
+					logger.debug('Received final transcription chunk: "%s" (accumulating)', text)
 					self._accumulated_transcription.append(text)
 				
 				self._last_final_text = text
@@ -126,8 +134,8 @@ class TextToAgentProcessor(FrameProcessor):
 					# Check if interim text is different from our accumulated text
 					accumulated_full = ' '.join(self._accumulated_transcription)
 					if self._last_interim_text != accumulated_full and not accumulated_full in self._last_interim_text:
-						logger.debug('🔄 Interim text detected after final, waiting more...')
-						# Reset interim text and wait again
+						logger.debug('Interim text detected after final, waiting more...')
+						# Reset interim text and wait again (use same short delay)
 						self._last_interim_text = None
 						await asyncio.sleep(self.silence_delay)
 						# Check again - if we still have accumulated text, process it
@@ -140,7 +148,7 @@ class TextToAgentProcessor(FrameProcessor):
 					# No interim text - process accumulated transcription
 					self._process_transcription()
 		except asyncio.CancelledError:
-			logger.debug('🎤 Transcription processing cancelled (new transcription received)')
+			logger.debug('Transcription processing cancelled (new transcription received)')
 		except Exception as e:
 			logger.error('Error processing transcription after silence: %s', e, exc_info=True)
 	
@@ -154,8 +162,7 @@ class TextToAgentProcessor(FrameProcessor):
 		full_text = self._merge_transcription_chunks(self._accumulated_transcription)
 		
 		if full_text and full_text.strip():
-			logger.info('🎤🎤🎤 STT final transcription (after %fs silence): "%s" 🎤🎤🎤', 
-				self.silence_delay, full_text)
+			logger.info('Heard: "%s"', full_text)
 			# Clear accumulated transcription
 			self._accumulated_transcription.clear()
 			self._last_final_text = None
@@ -329,21 +336,21 @@ class AgentToTTSProcessor(FrameProcessor):
 	async def send_text(self, text: str) -> None:
 		"""Send text to TTS by pushing TextFrame into the pipeline."""
 		if not text or not text.strip():
-			logger.debug('🔍 AgentToTTSProcessor.send_text: Empty text, skipping')
+			logger.debug('AgentToTTSProcessor.send_text: Empty text, skipping')
 			return
 		
 		text_clean = text.strip()
-		logger.info('🔊 AgentToTTSProcessor.send_text: Sending text to TTS: "%s"', text_clean)
+		logger.debug('AgentToTTSProcessor.send_text: Sending text to TTS: "%s"', text_clean)
 		
 		try:
 			# Push TextFrame into the pipeline - it will flow to TTS service
 			# The processor is already started as part of pipeline initialization
-			logger.debug(f'🔍 AgentToTTSProcessor.send_text: Pushing TextFrame with text="{text_clean[:100]}{"..." if len(text_clean) > 100 else ""}"')
+			logger.debug(f'AgentToTTSProcessor.send_text: Pushing TextFrame with text="{text_clean[:100]}{"..." if len(text_clean) > 100 else ""}"')
 			text_frame = TextFrame(text=text_clean)
 			await self.push_frame(text_frame, FrameDirection.DOWNSTREAM)
-			logger.debug(f'🔍 AgentToTTSProcessor.send_text: TextFrame pushed successfully')
+			logger.debug(f'AgentToTTSProcessor.send_text: TextFrame pushed successfully')
 		except Exception as e:
-			logger.error('❌ Error pushing TextFrame to pipeline: %s', e, exc_info=True)
+			logger.error('Error pushing TextFrame to pipeline: %s', e, exc_info=True)
 			raise  # Re-raise to see the full error
 
 	async def process_frame(self, frame, direction: FrameDirection) -> None:
@@ -395,11 +402,14 @@ class VoicePipeline:
 	async def initialize(self) -> bool:
 		"""Initialize the pipeline components."""
 		try:
-			# Create local audio transport with VAD configured for 2-second pause
-			logger.info('📋 Creating LocalAudioTransport with VAD (2s pause threshold)...')
+			# Create local audio transport with VAD configured for 1-second pause
+			logger.debug(
+				'Creating LocalAudioTransport with VAD (%.1fs pause threshold)...',
+				USER_SILENCE_DELAY_SECONDS,
+			)
 			try:
-				# Configure VAD to wait 2 seconds of silence before finalizing transcription
-				vad_params = VADParams(stop_secs=2.0)
+				# Configure VAD to wait 1 second of silence before finalizing transcription
+				vad_params = VADParams(stop_secs=USER_SILENCE_DELAY_SECONDS)
 				vad_analyzer = SileroVADAnalyzer(params=vad_params)
 				
 				transport_params = LocalAudioTransportParams(
@@ -408,7 +418,53 @@ class VoicePipeline:
 					vad_analyzer=vad_analyzer,
 				)
 				transport = LocalAudioTransport(transport_params)
-				logger.info('✅ LocalAudioTransport created with VAD (stop_secs=2.0)')
+				logger.debug(
+					'LocalAudioTransport created with VAD (stop_secs=%.1f)',
+					USER_SILENCE_DELAY_SECONDS,
+				)
+			except OSError as e:
+				# Handle PyAudio errors specifically
+				error_msg = str(e)
+				logger.error('Audio device error: %s', error_msg)
+				
+				# Try to list available audio devices for debugging
+				try:
+					import pyaudio
+					pa = pyaudio.PyAudio()
+					logger.debug('Available audio input devices:')
+					has_input = False
+					for i in range(pa.get_device_count()):
+						info = pa.get_device_info_by_index(i)
+						if info['maxInputChannels'] > 0:
+							has_input = True
+							default_str = ' (DEFAULT)' if i == pa.get_default_input_device_info()['index'] else ''
+							logger.info(
+								'  Device %d: %s (channels: %d)%s',
+								i,
+								info['name'],
+								info['maxInputChannels'],
+								default_str,
+							)
+					pa.terminate()
+					
+					if not has_input:
+						logger.error('No audio input devices found!')
+						logger.error('Solutions:')
+						logger.error('  1. Check that a microphone is connected')
+						logger.error('  2. Check Windows microphone permissions (Settings > Privacy > Microphone)')
+						logger.error('  3. Ensure no other application is using the microphone')
+						logger.error('  4. Update audio drivers')
+					else:
+						logger.error('Solutions:')
+						logger.error('  1. Check Windows microphone permissions (Settings > Privacy > Microphone)')
+						logger.error('  2. Ensure no other application is using the microphone')
+						logger.error('  3. Try closing and reopening the application')
+						logger.error('  4. Restart your computer if the issue persists')
+				except Exception as list_error:
+					logger.warning('Could not list audio devices: %s', list_error)
+				
+				logger.error('Full error details:', exc_info=True)
+				return False
 			except Exception as e:
 				logger.error('Failed to create LocalAudioTransport: %s', e, exc_info=True)
 				return False
@@ -416,24 +472,26 @@ class VoicePipeline:
 			self._transport = transport
 
 			# Initialize Deepgram STT with endpointing delay
-			logger.info('Initializing Deepgram STT service...')
+			logger.debug('Initializing Deepgram STT service...')
 			
-			# Configure endpointing delay to wait longer before finalizing utterances
-			# This prevents half-sentences from being registered as complete queries
+			# Configure endpointing delay to wait for a brief silence before finalizing utterances
+			# This prevents half-sentences from being registered as complete queries while keeping latency low
 			# utterance_end_ms: milliseconds of silence before Deepgram finalizes the utterance
 			# Note: utterance_end_ms requires vad_events=True, but SileroVAD handles transport-level VAD
 			# Deepgram VAD events are only used for utterance finalization timing
 			deepgram_options = None
 			if LiveOptions:
-				# Set utterance_end_ms to 2000ms (2 seconds) to add delay before finalizing
-				# This allows for natural speech pauses without splitting into separate tasks
-				# Higher value = longer wait before finalizing, preventing premature sentence splitting
+				# Set utterance_end_ms to match the silence delay for consistent behavior
+				utterance_end_ms = str(int(USER_SILENCE_DELAY_SECONDS * 1000))
 				deepgram_options = LiveOptions(
 					vad_events=True,  # Required for utterance_end_ms to work
-					utterance_end_ms="2000",  # Wait 2s of silence before finalizing (string format)
+					utterance_end_ms=utterance_end_ms,
 					interim_results=True,  # Keep interim results enabled for real-time feedback
 				)
-				logger.info('✅ Deepgram LiveOptions configured (utterance_end_ms="2000"ms, vad_events=True)')
+				logger.debug(
+					'Deepgram LiveOptions configured (utterance_end_ms="%sms", vad_events=True)',
+					utterance_end_ms,
+				)
 			else:
 				logger.warning('LiveOptions not available - Deepgram endpointing delay not configured')
 			
@@ -442,15 +500,15 @@ class VoicePipeline:
 				language=self.deepgram_language,
 				live_options=deepgram_options,
 			)
-			logger.info('✅ Deepgram STT service initialized (language: %s)', self.deepgram_language)
+			logger.debug('Deepgram STT service initialized (language: %s)', self.deepgram_language)
 
 			# Initialize ElevenLabs TTS
-			logger.info('Initializing ElevenLabs TTS service...')
+			logger.debug('Initializing ElevenLabs TTS service...')
 			tts_service = ElevenLabsTTSService(
 				api_key=self.elevenlabs_api_key,
 				voice_id=self.elevenlabs_voice_id,
 			)
-			logger.info('✅ ElevenLabs TTS service initialized (voice_id: %s)', self.elevenlabs_voice_id)
+			logger.debug('ElevenLabs TTS service initialized (voice_id: %s)', self.elevenlabs_voice_id)
 
 			# Create processors
 			text_to_agent = TextToAgentProcessor(self.agent_bridge)
@@ -462,7 +520,7 @@ class VoicePipeline:
 			self.agent_bridge.set_speech_tracker(self._speech_tracker)
 
 			# Build pipeline: Input -> STT -> TextToAgent -> AgentToTTS -> TTS -> SpeechTracker -> Output
-			logger.info('🔧 Building pipeline...')
+			logger.debug('Building pipeline...')
 			pipeline = Pipeline(
 				[
 					transport.input(),  # Transport user input
@@ -476,21 +534,21 @@ class VoicePipeline:
 			)
 			
 			self.pipeline = pipeline
-			logger.info('✅ Pipeline created')
+			logger.debug('Pipeline created')
 
 			# Create PipelineTask
-			logger.info('🔍 Creating PipelineTask...')
+			logger.debug('Creating PipelineTask...')
 			task = PipelineTask(pipeline)
 			self.task = task
-			logger.info('✅ PipelineTask created')
+			logger.debug('PipelineTask created')
 
 			# Create PipelineRunner
-			logger.info('🔍 Creating PipelineRunner...')
+			logger.debug('Creating PipelineRunner...')
 			runner = PipelineRunner()
 			self.runner = runner
-			logger.info('✅ PipelineRunner created')
+			logger.debug('PipelineRunner created')
 
-			logger.info('✅ Voice pipeline initialized successfully')
+			logger.info('Voice pipeline ready')
 			return True
 
 		except Exception as error:
@@ -502,8 +560,8 @@ class VoicePipeline:
 		if not self.pipeline or not self.task or not self.runner:
 			raise RuntimeError('Pipeline not initialized. Call initialize() first.')
 
-		logger.info('📢 Starting voice pipeline...')
-		logger.info('🎤 Microphone should be active. Speak clearly into your microphone.')
+		logger.debug('Starting voice pipeline...')
+		logger.debug('Microphone should be active. Speak clearly into your microphone.')
 		
 		# Run the pipeline task - this will block until cancelled
 		# The runner handles StartFrame automatically
@@ -517,7 +575,7 @@ class VoicePipeline:
 
 	async def stop(self) -> None:
 		"""Stop the pipeline."""
-		logger.info('🛑 Stopping voice pipeline...')
+		logger.debug('Stopping voice pipeline...')
 		
 		if self.task:
 			try:
@@ -531,4 +589,4 @@ class VoicePipeline:
 			except Exception as e:
 				logger.warning('Error cleaning up transport: %s', e)
 		
-		logger.info('✅ Voice pipeline stopped')
+		logger.debug('Voice pipeline stopped')

@@ -60,31 +60,65 @@ class DirectBrowserAgent:
 
 		self._conversation: List[BaseMessage] = []
 		self._context_log: List[str] = []
+		self._max_conversation_history: int = 50  # Limit conversation history to prevent token overflow
 
 	async def run(self, task: str) -> AgentRunResult:
-		logger.info('Starting agent task: %s', task)
+		logger.debug('Starting agent task: %s', task)
 		system_prompt = self.system_prompt_builder.build()
-		self._conversation.clear()
+		# Keep conversation history for session context - only clear per-run context log
+		# self._conversation.clear()  # Removed to maintain session memory
 		self._context_log.clear()
+		
+		# Add user task to conversation history if this is a new user query
+		# Only add if conversation is empty or last message was from assistant
+		if self._conversation:
+			last_message = self._conversation[-1]
+			if isinstance(last_message, AssistantMessage):
+				# Last message was from assistant, so this is a new user query
+				logger.debug('Adding new user task to conversation history')
+			elif isinstance(last_message, UserMessage):
+				# Last message was from user, don't duplicate
+				logger.debug('Last message was user message, not adding duplicate')
+		else:
+			# First message in conversation
+			logger.debug('Starting new conversation session')
 
-		try:
-			logger.debug('Fetching initial browser state for new query...')
-			state = await self.controller.refresh_state(include_dom=True, include_screenshot=False)
-			logger.debug('Initial browser state retrieved (URL: %s)', state.url if state else 'unknown')
-		except Exception as error:  # noqa: BLE001
-			logger.error('Failed to get initial browser state: %s', error, exc_info=True)
-			return AgentRunResult(
-				success=False,
-				awaiting_user_input=False,
-				message=f'Browser connection error: {error}',
-				structured_message='',
-				final_state=None,
-				context_log=[],
-			)
+		# Use cached state if available to avoid blocking DOM fetch on task start
+		# This significantly reduces latency - we'll refresh state in the first step if needed
+		used_cached_state = False
+		state = self.controller.last_state
+		if state is None:
+			try:
+				logger.debug('No cached state, fetching initial browser state...')
+				state = await self.controller.refresh_state(include_dom=True, include_screenshot=False)
+				logger.debug('Initial browser state retrieved (URL: %s)', state.url if state else 'unknown')
+			except Exception as error:  # noqa: BLE001
+				logger.error('Failed to get initial browser state: %s', error, exc_info=True)
+				return AgentRunResult(
+					success=False,
+					awaiting_user_input=False,
+					message=f'Browser connection error: {error}',
+					structured_message='',
+					final_state=None,
+					context_log=[],
+				)
+		else:
+			used_cached_state = True
+			logger.debug('Using cached browser state (URL: %s) - will refresh in first step if needed', state.url if state else 'unknown')
 
 		for step in range(1, self.config.max_steps + 1):
 			logger.debug('Agent step %d/%d', step, self.config.max_steps)
 			try:
+				# Refresh state in first step if we used cached state
+				# This ensures we have fresh state for the LLM while avoiding blocking on task start
+				if step == 1 and used_cached_state:
+					logger.debug('Refreshing browser state for first step (was using cached state)...')
+					try:
+						state = await self.controller.refresh_state(include_dom=True, include_screenshot=False)
+					except Exception as error:  # noqa: BLE001
+						logger.warning('Failed to refresh state in first step, using cached: %s', error)
+						state = self.controller.last_state or state
+				
 				tab_summary = self._format_tab_summary(state)
 				context_lines = '\n'.join(self._context_log[-6:])
 				observation = self.observation_builder.build(
@@ -176,7 +210,36 @@ class DirectBrowserAgent:
 
 			logger.debug('LLM response (first 200 chars): %s', response_text[:200])
 			assistant_message = AssistantMessage(content=response_text)
-			self._conversation.extend([user_message, assistant_message])
+			
+			# Add messages to conversation history
+			# Only add user_message on step 1 (new task), since the observation contains the task
+			# Subsequent steps within the same task are internal agent reasoning
+			if step == 1:
+				# For first step, add the user task/observation message
+				# This represents the new user query
+				self._conversation.append(user_message)
+				logger.debug('Added user task to conversation history: %s', task[:100])
+			
+			# Always add assistant response to conversation history
+			self._conversation.append(assistant_message)
+			
+			# Trim conversation history if it exceeds limit (keep system message equivalent space)
+			# We want to keep the most recent messages while staying within token limits
+			if len(self._conversation) > self._max_conversation_history:
+				# Keep first few messages (system-like context) and most recent
+				# Remove middle messages to stay within limit
+				keep_recent = self._max_conversation_history // 2
+				keep_early = self._max_conversation_history - keep_recent
+				self._conversation = (
+					self._conversation[:keep_early] + 
+					self._conversation[-keep_recent:]
+				)
+				logger.debug(
+					'Trimmed conversation history to %d messages (kept %d early + %d recent)',
+					len(self._conversation),
+					keep_early,
+					keep_recent,
+				)
 
 			try:
 				structured = parse_structured_response(response_text)
@@ -197,24 +260,36 @@ class DirectBrowserAgent:
 
 			action_type = action_payload.get('type', '').lower()
 			
-			# Only call step callback after we have valid structured response
-			# Extract agent response: Narration is what the agent SAYS it's doing (before action)
-			# Result is what the agent SAYS happened (after action)
-			agent_response_text = structured.narration[-1] if structured.narration else ''
-			if not agent_response_text:
-				# Fallback: use Result if Narration is empty
-				agent_response_text = structured.results[-1] if structured.results else ''
-			if not agent_response_text:
-				agent_response_text = 'Preparing to execute action...'
-			
 			# Extract reasoning: from Thinking section + state analysis (separate from narration)
 			reasoning_text = self._extract_reasoning_from_state(current_observation, structured, state=state)
 			
 			# Format tool execution info
 			tool_info = self._format_tool_info(action_type, action_payload)
 			
-			# Call step callback BEFORE execution (shows what we're about to do)
-			# Pass: step, reasoning, agent_response (narration), action (tool)
+			# For "none" and "await_user_input" actions (no browser action to execute), use the final complete result
+			# in the "before" phase since there's no actual action to execute - the response IS the result
+			if action_type in {'none', 'done', 'await_user_input', 'awaiting_user_input'}:
+				# Use the best/final message as the response (includes complete answer)
+				agent_response_text = self._select_final_message(structured)
+				if not agent_response_text:
+					# Fallback to results or narration
+					agent_response_text = structured.results[-1] if structured.results else ''
+					if not agent_response_text:
+						if action_type in {'await_user_input', 'awaiting_user_input'}:
+							agent_response_text = structured.narration[-1] if structured.narration else 'I need your input to continue.'
+						else:
+							agent_response_text = structured.narration[-1] if structured.narration else 'Task completed.'
+			else:
+				# For actions that will execute, use narration (what agent SAYS it's doing before action)
+				agent_response_text = structured.narration[-1] if structured.narration else ''
+				if not agent_response_text:
+					# Fallback: use Result if Narration is empty
+					agent_response_text = structured.results[-1] if structured.results else ''
+				if not agent_response_text:
+					agent_response_text = 'Preparing to execute action...'
+			
+			# Call step callback BEFORE execution (or completion for "none" actions)
+			# For "none" actions, this contains the complete response since there's no action to execute
 			if self.step_callback and agent_response_text and tool_info:
 				try:
 					result = self.step_callback(step, reasoning_text, agent_response_text, tool_info, 'before')
@@ -224,20 +299,11 @@ class DirectBrowserAgent:
 				except Exception as callback_error:  # noqa: BLE001
 					logger.warning('Step callback error: %s', callback_error)
 			
+			# For "none" actions, we're done - the complete response was already sent in "before" phase
 			if action_type in {'none', 'done'}:
 				final_text = self._select_final_message(structured)
 				full = self._format_structured(structured)
-				# For completion, use Result as agent response (what agent says happened)
-				completion_response = structured.results[-1] if structured.results else agent_response_text
-				if not completion_response:
-					completion_response = 'Task completed.'
-				if self.step_callback:
-					try:
-						result = self.step_callback(step, reasoning_text, completion_response, 'Task completed', 'after')
-						if asyncio.iscoroutine(result):
-							await result
-					except Exception as callback_error:  # noqa: BLE001
-						logger.warning('Step callback error: %s', callback_error)
+				# No need to call step_callback again - the complete response was already sent above
 				return AgentRunResult(
 					success=True,
 					awaiting_user_input=False,
@@ -247,20 +313,11 @@ class DirectBrowserAgent:
 					context_log=list(self._context_log),
 				)
 
+			# For "await_user_input" actions, we're done - the complete response was already sent in "before" phase
 			if action_type in {'await_user_input', 'awaiting_user_input'}:
 				final_text = self._select_final_message(structured)
 				full = self._format_structured(structured)
-				# For user input requests, use Result as agent response
-				await_response = structured.results[-1] if structured.results else agent_response_text
-				if not await_response:
-					await_response = 'I need your input to continue.'
-				if self.step_callback:
-					try:
-						result = self.step_callback(step, reasoning_text, await_response, 'Awaiting user input', 'after')
-						if asyncio.iscoroutine(result):
-							await result
-					except Exception as callback_error:  # noqa: BLE001
-						logger.warning('Step callback error: %s', callback_error)
+				# No need to call step_callback again - the complete response was already sent above
 				return AgentRunResult(
 					success=False,
 					awaiting_user_input=True,
@@ -295,7 +352,7 @@ class DirectBrowserAgent:
 
 			# Wait for page to stabilize after action (dynamic content may need time to load)
 			# Reduced delay for faster response - browser-use Tools handle their own timing
-			wait_time = 0.5
+			wait_time = 0.2  # Reduced from 0.5s for faster response
 			logger.debug('Waiting %.1fs for page to stabilize before refreshing state...', wait_time)
 			await asyncio.sleep(wait_time)
 			
@@ -308,9 +365,8 @@ class DirectBrowserAgent:
 				logger.debug('Browser state refreshed successfully (URL: %s)', state.url if state else 'unknown')
 			except Exception as error:  # noqa: BLE001
 				logger.warning('Failed to refresh browser state: %s', error)
-				# Try once more after a short delay
-			await asyncio.sleep(0.5)
-			state = await self.controller.refresh_state(include_dom=True, include_screenshot=False)
+				# Use cached state as fallback instead of waiting and retrying
+				state = self.controller.last_state or state
 
 		return AgentRunResult(
 			success=False,
@@ -520,6 +576,26 @@ class DirectBrowserAgent:
 		if reasoning_parts:
 			return ' | '.join(reasoning_parts)
 		return 'Analyzing current browser state and planning next action...'
+
+	def clear_conversation(self) -> None:
+		"""Clear conversation history to start a new session."""
+		logger.info('Clearing conversation history for new session')
+		self._conversation.clear()
+		self._context_log.clear()
+
+	def get_conversation_summary(self) -> str:
+		"""Get a summary of the conversation history."""
+		if not self._conversation:
+			return 'No conversation history'
+		summary_parts = []
+		for i, msg in enumerate(self._conversation[-10:], start=1):  # Last 10 messages
+			if isinstance(msg, UserMessage):
+				content = str(msg.content)[:100]
+				summary_parts.append(f'{i}. User: {content}...' if len(str(msg.content)) > 100 else f'{i}. User: {content}')
+			elif isinstance(msg, AssistantMessage):
+				content = str(msg.content)[:100]
+				summary_parts.append(f'{i}. Assistant: {content}...' if len(str(msg.content)) > 100 else f'{i}. Assistant: {content}')
+		return '\n'.join(summary_parts)
 
 	def _format_tool_info(self, action_type: str, payload: Dict[str, Any]) -> str:
 		"""Format tool execution information in a readable way."""

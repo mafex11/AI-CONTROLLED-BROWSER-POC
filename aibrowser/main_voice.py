@@ -19,16 +19,30 @@ LOGGER = logging.getLogger(__name__)
 
 
 def setup_logging() -> None:
-	log_format = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
-	logging.basicConfig(level=logging.INFO, format=log_format)
-	logging.getLogger('aibrowser').setLevel(logging.DEBUG)
+	"""Configure clean, consistent logging for the application."""
+	# Clean format without timestamps for better readability
+	log_format = '%(levelname)-8s | %(message)s'
+	logging.basicConfig(level=logging.INFO, format=log_format, datefmt='')
+	
+	# Set levels - reduce noise from third-party libraries
+	logging.getLogger('aibrowser').setLevel(logging.INFO)  # Use INFO for cleaner output
 	logging.getLogger('asyncio').setLevel(logging.WARNING)
-	logging.getLogger('pipecat').setLevel(logging.DEBUG)  # Changed to DEBUG to see audio frames
-	logging.getLogger('pipecat.services.deepgram').setLevel(logging.DEBUG)
-	logging.getLogger('pipecat.transports.local').setLevel(logging.DEBUG)
+	
+	# Suppress verbose pipecat logs - only show important messages
+	logging.getLogger('pipecat').setLevel(logging.WARNING)
+	logging.getLogger('pipecat.services.deepgram').setLevel(logging.WARNING)
+	logging.getLogger('pipecat.transports.local').setLevel(logging.WARNING)
+	logging.getLogger('pipecat.audio.vad').setLevel(logging.WARNING)
+	logging.getLogger('pipecat.pipeline').setLevel(logging.WARNING)
+	logging.getLogger('pipecat.processors').setLevel(logging.WARNING)
+	
+	# Suppress other noisy libraries
+	logging.getLogger('httpx').setLevel(logging.WARNING)
+	logging.getLogger('httpcore').setLevel(logging.WARNING)
 
 
 async def voice_loop(integration: BrowserUseIntegration) -> None:
+	"""Main voice interaction loop."""
 	print('\n' + '=' * 60)
 	print('AI Browser Voice Mode')
 	print('=' * 60)
@@ -36,11 +50,11 @@ async def voice_loop(integration: BrowserUseIntegration) -> None:
 	print('=' * 60 + '\n')
 
 	def on_user_speech(text: str) -> None:
-		print(f'You: {text}')
+		print(f'\n[You] {text}')
 
 	def on_agent_response(text: str) -> None:
 		if text:
-			print(f'Agent: {text}')
+			print(f'[Agent] {text}')
 
 	# Create agent bridge
 	agent_bridge = AgentBridge(
@@ -66,7 +80,6 @@ async def voice_loop(integration: BrowserUseIntegration) -> None:
 	# Run pipeline - this will block until cancelled
 	try:
 		print('Voice pipeline started. Listening...\n')
-		print('🎤 Speak your browser task. Say "exit" or "quit" to stop.\n')
 		
 		# Run the pipeline (blocks until cancelled)
 		await pipeline.run()

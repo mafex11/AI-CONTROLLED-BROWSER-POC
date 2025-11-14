@@ -159,6 +159,18 @@ class BrowserUseIntegration:
 			self.step_callback = step_callback
 			self._state.agent.step_callback = step_callback
 
+	def clear_conversation(self) -> None:
+		"""Clear conversation history to start a new session."""
+		if not self._initialized or not self._state:
+			return
+		self._state.agent.clear_conversation()
+
+	def get_conversation_summary(self) -> str:
+		"""Get a summary of the conversation history."""
+		if not self._initialized or not self._state:
+			return 'Agent not initialized'
+		return self._state.agent.get_conversation_summary()
+
 	async def shutdown(self) -> None:
 		if self._state:
 			try:
@@ -193,6 +205,7 @@ class BrowserUseIntegration:
 			is_local=False,
 		)
 		await session.start()
-		await asyncio.sleep(0.5)
+		# Reduced delay - session.start() already handles initialization
+		await asyncio.sleep(0.1)
 		return session
 
