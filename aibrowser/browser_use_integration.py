@@ -198,5 +198,82 @@ class BrowserUseIntegration:
 		)
 		await session.start()
 		await asyncio.sleep(0.1)
+		
+		# Inject script to prevent new tabs from opening
+		# This script runs on every new document/page load
+		prevent_new_tabs_script = """
+		(function() {
+			// Remove target="_blank" from all links
+			function removeTargetBlank() {
+				const links = document.querySelectorAll('a[target="_blank"], a[target="blank"]');
+				links.forEach(link => {
+					link.removeAttribute('target');
+				});
+			}
+			
+			// Override window.open to open in same tab instead
+			const originalWindowOpen = window.open;
+			window.open = function(url, target, features) {
+				if (target === '_blank' || target === 'blank') {
+					// Open in same tab instead
+					if (url) {
+						window.location.href = url;
+					}
+					return window;
+				}
+				// For other targets, use original behavior
+				return originalWindowOpen.call(window, url, target, features);
+			};
+			
+			// Setup function to initialize all handlers
+			function setupHandlers() {
+				// Intercept clicks on links with target="_blank"
+				document.addEventListener('click', function(e) {
+					let element = e.target;
+					// Traverse up to find the link element
+					while (element && element.tagName !== 'A') {
+						element = element.parentElement;
+					}
+					if (element && element.tagName === 'A') {
+						const target = element.getAttribute('target');
+						if (target === '_blank' || target === 'blank') {
+							// Remove target attribute and let default click behavior happen
+							element.removeAttribute('target');
+						}
+					}
+				}, true); // Use capture phase to catch before default behavior
+				
+				// Remove target="_blank" from existing links
+				removeTargetBlank();
+				
+				// Also remove on dynamic content changes (MutationObserver)
+				if (document.body || document.documentElement) {
+					const observer = new MutationObserver(function(mutations) {
+						removeTargetBlank();
+					});
+					observer.observe(document.body || document.documentElement, {
+						childList: true,
+						subtree: true
+					});
+				}
+			}
+			
+			// Initialize handlers when document is ready
+			if (document.readyState === 'loading') {
+				document.addEventListener('DOMContentLoaded', setupHandlers);
+			} else {
+				setupHandlers();
+			}
+		})();
+		"""
+		
+		try:
+			# Add the script to run on every new document
+			# Using private method _cdp_add_init_script as it's the only way to inject init scripts
+			await session._cdp_add_init_script(prevent_new_tabs_script)
+			logger.debug('Injected script to prevent new tabs from opening')
+		except Exception as error:  # noqa: BLE001
+			logger.warning('Failed to inject prevent-new-tabs script: %s', error)
+		
 		return session
 

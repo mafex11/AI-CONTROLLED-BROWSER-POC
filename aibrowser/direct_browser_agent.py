@@ -351,6 +351,12 @@ class DirectBrowserAgent:
 				'timed out' in result_str.lower()
 			)
 			
+			# Detect element-related errors that indicate page structure changed
+			element_changed = self._is_element_error(result_str)
+			if element_changed:
+				self._context_log.append('Element error detected - page structure may have changed, refreshing DOM and screenshot')
+				self._context_log = self._context_log[-20:]
+			
 			# Call step callback AFTER execution (shows result)
 			# Use Result as agent response (what agent says happened)
 			after_response = structured.results[-1] if structured.results else agent_response_text
@@ -375,11 +381,17 @@ class DirectBrowserAgent:
 				logger.debug('Waiting %.1fs for page to stabilize before refreshing state...', wait_time)
 			await asyncio.sleep(wait_time)
 			
-			logger.debug('Refreshing browser state to get latest page content...')
+			# If element changed/not found, include screenshot to help agent see what changed
+			include_screenshot = element_changed
+			if element_changed:
+				logger.debug('Element error detected, refreshing state with screenshot to capture current page state...')
+			else:
+				logger.debug('Refreshing browser state to get latest page content...')
+			
 			try:
 				# Add timeout to prevent hanging on state refresh
 				state = await asyncio.wait_for(
-					self.controller.refresh_state(include_dom=True, include_screenshot=False),
+					self.controller.refresh_state(include_dom=True, include_screenshot=include_screenshot),
 					timeout=30.0
 				)
 				logger.debug('Browser state refreshed successfully (URL: %s)', state.url if state else 'unknown')
@@ -401,6 +413,39 @@ class DirectBrowserAgent:
 			final_state=state,
 			context_log=list(self._context_log),
 		)
+
+	def _is_element_error(self, result_str: str) -> bool:
+		"""Check if the error indicates an element changed or is not found."""
+		if not result_str:
+			return False
+		
+		result_lower = result_str.lower()
+		element_error_indicators = [
+			'not available',
+			'not found',
+			'may have changed',
+			'page may have changed',
+			'stale',
+			'backendnodeid',
+			'selector_map',
+			'element index',
+			'element with',
+		]
+		
+		# Check for element-related error patterns
+		for indicator in element_error_indicators:
+			if indicator in result_lower:
+				return True
+		
+		# Check for specific error messages about elements
+		if 'element' in result_lower and ('not' in result_lower or 'changed' in result_lower):
+			return True
+		
+		# Check for index-related errors
+		if 'index' in result_lower and 'not' in result_lower:
+			return True
+		
+		return False
 
 	def _format_tab_summary(self, state) -> str:
 		if state is None:
