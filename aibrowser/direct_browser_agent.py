@@ -66,6 +66,7 @@ class DirectBrowserAgent:
 		self._conversation: List[BaseMessage] = []
 		self._context_log: List[str] = []
 		self._max_conversation_history: int = 50
+		self._last_highlight_screenshot_base64: str | None = None  # Store last highlight screenshot for step callback
 
 	def _check_step_timeout(self, step: int, step_start_time: float) -> bool:
 		"""Check if step has exceeded timeout. Returns True if timeout exceeded."""
@@ -366,6 +367,12 @@ class DirectBrowserAgent:
 				if not agent_response_text:
 					agent_response_text = 'Preparing to execute action...'
 			
+			# Show highlight and take screenshot BEFORE step callback for click/input actions
+			# This ensures the step callback gets the highlighted screenshot with element markings
+			# Always do this (not just when saving to disk) so frontend gets marked screenshots
+			if action_type in {'click', 'input'}:
+				await self._preview_and_capture_highlight(action_type, action_payload, step)
+			
 			if self.step_callback and agent_response_text and tool_info:
 				try:
 					result = self.step_callback(step, reasoning_text, agent_response_text, tool_info, 'before')
@@ -373,6 +380,9 @@ class DirectBrowserAgent:
 						await result
 				except Exception as callback_error:  # noqa: BLE001
 					logger.warning('Step callback error: %s', callback_error)
+			
+			# Clear the stored screenshot after step callback (so it's not reused)
+			self._last_highlight_screenshot_base64 = None
 			
 			if action_type in {'none', 'done'}:
 				final_text = self._select_final_message(structured)
@@ -424,10 +434,6 @@ class DirectBrowserAgent:
 			# the LLM saw. Do NOT refresh state here as it would create new backend_node_ids
 			# and break the element lookup.
 			logger.debug('Executing action %s at step %d...', action_type, step)
-			
-			# If screenshot saving is enabled, show highlight first, take screenshot, then execute action
-			if Config.SAVE_HIGHLIGHT_SCREENSHOTS and action_type in {'click', 'input'}:
-				await self._preview_and_capture_highlight(action_type, action_payload, step)
 			
 			try:
 				# Add timeout to prevent hanging on action execution
@@ -743,10 +749,10 @@ class DirectBrowserAgent:
 			logger.error('Action execution failed: %s', error, exc_info=True)
 			return f'Action {action_type} failed: {error}'
 
-	async def _preview_and_capture_highlight(self, action_type: str, payload: Dict[str, Any], step: int) -> None:
-		"""Show highlight indicator, wait for it to appear, take screenshot, then action will execute."""
-		if not Config.SAVE_HIGHLIGHT_SCREENSHOTS:
-			return
+	async def _preview_and_capture_highlight(self, action_type: str, payload: Dict[str, Any], step: int) -> str | None:
+		"""Show highlight indicator, wait for it to appear, take screenshot, then action will execute.
+		Returns base64 encoded screenshot data for use in step callback.
+		Always captures screenshot for frontend use, even if not saving to disk."""
 		
 		try:
 			node = None
@@ -759,11 +765,11 @@ class DirectBrowserAgent:
 			elif action_type == 'click' and payload.get('coordinate_x') is not None:
 				# For coordinate clicks, we can't easily get the node, so skip preview
 				logger.debug('Coordinate-based click - skipping highlight preview')
-				return
+				return None
 			
 			if not node:
 				logger.warning('Could not find element node for highlight preview')
-				return
+				return None
 			
 			# Show highlight indicator before executing action
 			await self.controller.browser_session.highlight_interaction_element(node)
@@ -771,31 +777,65 @@ class DirectBrowserAgent:
 			# Wait for highlight to fully appear and be visible
 			await asyncio.sleep(Config.HIGHLIGHT_SCREENSHOT_DELAY)
 			
-			# Create screenshot directory if it doesn't exist
-			screenshot_dir = Path(Config.SCREENSHOT_DIR)
-			screenshot_dir.mkdir(parents=True, exist_ok=True)
-			
-			# Generate filename with timestamp, step, and action details
-			timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]  # Include milliseconds
-			
-			# Add action-specific info to filename
-			action_info = action_type
-			if action_type == 'click' and payload.get('index') is not None:
-				action_info = f'click_idx{payload["index"]}'
-			elif action_type == 'input' and payload.get('index') is not None:
-				action_info = f'input_idx{payload["index"]}'
-			
-			filename = f'highlight_{action_info}_step{step}_{timestamp}.png'
-			screenshot_path = screenshot_dir / filename
-			
 			# Take screenshot with highlight visible
-			await self.controller.browser_session.take_screenshot(
-				path=str(screenshot_path),
-				full_page=False,
-				format='png',
-			)
+			# We'll capture it to a temporary location first, then read it for base64
+			import tempfile
+			import base64
+			import os
 			
-			logger.debug('Captured highlight screenshot (before action): %s', screenshot_path)
+			tmp_path = None
+			try:
+				with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+					tmp_path = tmp_file.name
+				# Take screenshot to temporary file
+				await self.controller.browser_session.take_screenshot(
+					path=tmp_path,
+					full_page=False,
+					format='png',
+				)
+				
+				# Read the screenshot and convert to base64 for frontend
+				with open(tmp_path, 'rb') as f:
+					screenshot_bytes = f.read()
+					screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+					# Store for use in step callback
+					self._last_highlight_screenshot_base64 = f'data:image/png;base64,{screenshot_base64}'
+				
+				# If saving to disk is enabled, also save to the configured directory
+				if Config.SAVE_HIGHLIGHT_SCREENSHOTS:
+					screenshot_dir = Path(Config.SCREENSHOT_DIR)
+					screenshot_dir.mkdir(parents=True, exist_ok=True)
+					
+					# Generate filename with timestamp, step, and action details
+					timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]  # Include milliseconds
+					
+					# Add action-specific info to filename
+					action_info = action_type
+					if action_type == 'click' and payload.get('index') is not None:
+						action_info = f'click_idx{payload["index"]}'
+					elif action_type == 'input' and payload.get('index') is not None:
+						action_info = f'input_idx{payload["index"]}'
+					
+					filename = f'highlight_{action_info}_step{step}_{timestamp}.png'
+					screenshot_path = screenshot_dir / filename
+					
+					# Copy the temporary file to the final location
+					import shutil
+					shutil.copy2(tmp_path, str(screenshot_path))
+					logger.debug('Captured highlight screenshot (before action): %s', screenshot_path)
+				
+				return self._last_highlight_screenshot_base64
+			except Exception as e:
+				logger.warning('Failed to capture highlight screenshot: %s', e)
+				return None
+			finally:
+				# Clean up temporary file
+				if tmp_path:
+					try:
+						if os.path.exists(tmp_path):
+							os.unlink(tmp_path)
+					except Exception:
+						pass
 			
 			# Note: Highlight will automatically fade after configured duration
 			# The actual action will execute next, which may trigger another highlight
@@ -804,6 +844,7 @@ class DirectBrowserAgent:
 		except Exception as error:  # noqa: BLE001
 			# Don't fail the action if screenshot capture fails
 			logger.warning('Failed to preview and capture highlight screenshot: %s', error)
+			return None
 
 	def _select_final_message(self, structured: StructuredAgentResponse) -> str:
 		best = structured.best_message()

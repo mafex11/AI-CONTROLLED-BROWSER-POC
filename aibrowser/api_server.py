@@ -48,12 +48,21 @@ class QueryRequest(BaseModel):
 
 
 async def get_screenshot_base64(integration: BrowserUseIntegration) -> Optional[str]:
-    """Get screenshot from browser integration as base64 string."""
+    """Get screenshot from browser integration as base64 string.
+    If a highlight screenshot is available (from _preview_and_capture_highlight), use that instead."""
     if not integration or not integration._state:
         return None
     
     try:
-        # Refresh state with screenshot
+        # First, check if there's a stored highlight screenshot from the agent
+        # This will have element markings that the regular screenshot won't have
+        if integration._state and integration._state.agent:
+            agent = integration._state.agent
+            if hasattr(agent, '_last_highlight_screenshot_base64') and agent._last_highlight_screenshot_base64:
+                logger.debug('Using stored highlight screenshot for frontend')
+                return agent._last_highlight_screenshot_base64
+        
+        # Fallback to regular screenshot if no highlight screenshot available
         state = await integration._state.controller.refresh_state(
             include_dom=False,
             include_screenshot=True,
