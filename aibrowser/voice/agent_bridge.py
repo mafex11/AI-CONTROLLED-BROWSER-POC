@@ -210,39 +210,46 @@ class AgentBridge:
 					
 					print(f'{"-"*70}')
 					
-					# Handle after-phase responses for both single-step and multi-step tasks
-					logger.debug(f'After-phase callback: tool="{tool}", narration="{narration}", step={step}')
-					message = None
-					
-					if narration and narration.strip():
-						message = narration.strip().replace('.', '').replace('?', '').replace('!', '')
-						if narration.strip()[-1] in '.?!':
-							message += '.'
-					
-					logger.debug(f'Processed message="{message}", last_message="{_last_tts_message}", are_equal={message == _last_tts_message if message else False}')
-					
-					if message and message != _last_tts_message:
-						if not (message.startswith('{') or message.startswith('[') or 'index=' in message.lower()):
-							logger.debug(f'Step {step} (after): {message}')
-							old_last_message = _last_tts_message
-							_last_tts_message = message
-							logger.debug(f'About to send TTS message: "{message}"')
-							try:
-								await self._send_to_tts(message)
-								logger.debug(f'TTS message sent successfully, waiting for speech...')
-							except Exception as e:
-								logger.error(f'Error sending TTS message: {e}', exc_info=True)
-							if self._speech_tracker:
+					if tool and 'Task completed' in tool:
+						if _step_counter <= 1:
+							logger.debug(
+								'Task completed but only one step detected; skipping after-phase TTS to keep single-step responses brief'
+							)
+							return
+						logger.debug(f'Task completed detected, tool="{tool}", narration="{narration}"')
+						message = None
+						
+						if narration and narration.strip():
+							message = narration.strip().replace('.', '').replace('?', '').replace('!', '')
+							if narration.strip()[-1] in '.?!':
+								message += '.'
+						
+						logger.debug(f'Processed message="{message}", last_message="{_last_tts_message}", are_equal={message == _last_tts_message if message else False}')
+						
+						if message and message != _last_tts_message:
+							if not (message.startswith('{') or message.startswith('[') or 'index=' in message.lower()):
+								logger.debug(f'Step {step} (after - task completed): {message}')
+								old_last_message = _last_tts_message
+								_last_tts_message = message
+								logger.debug(f'About to send TTS message: "{message}"')
 								try:
-									logger.debug(f'Waiting for speech to complete after action...')
-									await self._speech_tracker.wait_for_speech_completion(timeout=30.0)
-									logger.debug(f'Speech completed after action')
+									await self._send_to_tts(message)
+									logger.debug(f'TTS message sent successfully, waiting for speech...')
 								except Exception as e:
-									logger.warning(f'Error waiting for speech completion: {e}')
+									logger.error(f'Error sending TTS message: {e}', exc_info=True)
+								if self._speech_tracker:
+									try:
+										logger.debug(f'Waiting for speech to complete after task completion...')
+										await self._speech_tracker.wait_for_speech_completion(timeout=30.0)
+										logger.debug(f'Speech completed after task completion')
+									except Exception as e:
+										logger.warning(f'Error waiting for speech completion: {e}')
+							else:
+								logger.debug(f'Message filtered out due to JSON/technical content: "{message}"')
 						else:
-							logger.debug(f'Message filtered out due to JSON/technical content: "{message}"')
+							logger.debug(f'Message not sent: message={message is not None}, different={message != _last_tts_message if message else False}')
 					else:
-						logger.debug(f'Message not sent: message={message is not None}, different={message != _last_tts_message if message else False}')
+						logger.debug(f'Not a task completion step: tool="{tool}"')
 
 			original_narration = self.integration.narration_callback
 			original_step = self.integration.step_callback

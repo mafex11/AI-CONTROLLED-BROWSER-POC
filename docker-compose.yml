@@ -1,0 +1,58 @@
+services:
+  aibrowser:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aibrowser
+    restart: unless-stopped
+    environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - GEMINI_TEMPERATURE=${GEMINI_TEMPERATURE:-0.3}
+      - GEMINI_MAX_OUTPUT_TOKENS=${GEMINI_MAX_OUTPUT_TOKENS:-8000}
+      - CHROMIUM_HEADLESS=${CHROMIUM_HEADLESS:-true}
+      - CHROME_DEBUG_PORT=${CHROME_DEBUG_PORT:-9222}
+      - DEFAULT_SEARCH_ENGINE=${DEFAULT_SEARCH_ENGINE:-google}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
+    ports:
+      - "${CHROME_DEBUG_PORT:-9222}:9222"
+    volumes:
+      - chromium_profile:/root/.cache/aibrowser/chromium_profile
+    shm_size: '2gb'
+    stdin_open: true
+    tty: true
+
+  aibrowser-voice:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aibrowser-voice
+    restart: unless-stopped
+    environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - CHROMIUM_HEADLESS=${CHROMIUM_HEADLESS:-true}
+      - CHROME_DEBUG_PORT=9223
+      - DEFAULT_SEARCH_ENGINE=${DEFAULT_SEARCH_ENGINE:-google}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID:-21m00Tcm4TlvDq8ikWAM}
+      - DEEPGRAM_LANGUAGE=${DEEPGRAM_LANGUAGE:-en-US}
+    ports:
+      - "${CHROME_DEBUG_PORT_VOICE:-9223}:9223"
+    volumes:
+      - chromium_profile_voice:/root/.cache/aibrowser/chromium_profile
+    shm_size: '2gb'
+    stdin_open: true
+    tty: true
+    command: python -m aibrowser.main_voice
+    profiles:
+      - voice
+
+volumes:
+  chromium_profile:
+  chromium_profile_voice:
+

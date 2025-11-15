@@ -103,7 +103,7 @@ class BrowserUseIntegration:
 				observation_builder=observation_builder,
 				answer_builder=answer_builder,
 				config=AgentRunConfig(
-					max_steps=25,
+					max_steps=50,
 					search_engine=self.default_search_engine,
 					max_missing_action_retries=Config.GEMINI_MAX_OUTPUT_TOKENS // 400 if Config.GEMINI_MAX_OUTPUT_TOKENS else 5,
 				),
@@ -127,11 +127,6 @@ class BrowserUseIntegration:
 		if not self._initialized or not self._state:
 			raise RuntimeError('BrowserUseIntegration is not initialized.')
 
-		normalized = command.strip().lower()
-
-		if self._is_describe_page_command(normalized):
-			return await self._describe_current_page()
-
 		result = await self._state.agent.run(command)
 		payload: Dict[str, Any] = {
 			'success': result.success,
@@ -151,7 +146,6 @@ class BrowserUseIntegration:
 		narration_callback=_CALLBACK_SENTINEL,
 		step_callback=_CALLBACK_SENTINEL,
 	) -> None:
-		"""Update integration and agent callbacks at runtime."""
 		if not self._initialized or not self._state:
 			return
 		if narration_callback is not _CALLBACK_SENTINEL:
@@ -162,13 +156,11 @@ class BrowserUseIntegration:
 			self._state.agent.step_callback = step_callback
 
 	def clear_conversation(self) -> None:
-		"""Clear conversation history to start a new session."""
 		if not self._initialized or not self._state:
 			return
 		self._state.agent.clear_conversation()
 
 	def get_conversation_summary(self) -> str:
-		"""Get a summary of the conversation history."""
 		if not self._initialized or not self._state:
 			return 'Agent not initialized'
 		return self._state.agent.get_conversation_summary()
@@ -200,63 +192,11 @@ class BrowserUseIntegration:
 		if not self.cdp_url:
 			raise RuntimeError('cdp_url is required to connect to Chromium.')
 
-		# is_local=False because CDPBrowserManager handles Chrome lifecycle
 		session = BrowserSession(
 			cdp_url=self.cdp_url,
 			is_local=False,
 		)
 		await session.start()
-		# Reduced delay - session.start() already handles initialization
 		await asyncio.sleep(0.1)
 		return session
-
-	def _is_describe_page_command(self, normalized: str) -> bool:
-		phrases = [
-			"describe what's on the page",
-			'describe whats on the page',
-			'describe the page',
-			"what's on the page",
-			'whats on the page',
-			'what is on the page',
-			'what do you see on the page',
-			'what do you see',
-			'describe the screen',
-		]
-		return any(phrase in normalized for phrase in phrases)
-
-	async def _describe_current_page(self) -> Dict[str, Any]:
-		if not self._state:
-			raise RuntimeError('BrowserUseIntegration is not initialized.')
-
-		controller = self._state.controller
-		agent = self._state.agent
-
-		state = controller.last_state
-		try:
-			state = await controller.refresh_state(include_dom=True, include_screenshot=False)
-		except Exception:
-			# Fall back to last known state if refresh fails
-			pass
-
-		description = ''
-		if state is not None:
-			try:
-				description = agent._extract_page_info(state)  # type: ignore[attr-defined]
-			except Exception:
-				try:
-					description = agent._format_tab_summary(state)  # type: ignore[attr-defined]
-				except Exception:
-					description = 'Unable to read current page state.'
-		else:
-			description = 'No page state available.'
-
-		return {
-			'success': True,
-			'awaiting_user_input': False,
-			'message': description,
-			'structured_message': description,
-			'context': [],
-			'final_url': getattr(state, 'url', None) if state is not None else None,
-			'final_title': getattr(state, 'title', None) if state is not None else None,
-		}
 

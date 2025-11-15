@@ -90,7 +90,6 @@ class BrowserController:
 		)
 
 	async def scroll(self, *, direction: str, pages: float = 1.0, index: Optional[int] = None) -> ActionResult:
-		# Convert direction string to boolean 'down' field required by ScrollAction
 		down = direction.lower() in ('down', 'd')
 		payload: Dict[str, Any] = {'down': down, 'pages': pages}
 		if index is not None:

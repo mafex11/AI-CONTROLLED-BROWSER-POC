@@ -60,7 +60,7 @@ class DirectBrowserAgent:
 
 		self._conversation: List[BaseMessage] = []
 		self._context_log: List[str] = []
-		self._max_conversation_history: int = 50  # Limit conversation history to prevent token overflow
+		self._max_conversation_history: int = 50
 
 	async def run(self, task: str) -> AgentRunResult:
 		logger.debug('Starting agent task: %s', task)
@@ -70,14 +70,15 @@ class DirectBrowserAgent:
 		if self._conversation:
 			last_message = self._conversation[-1]
 			if isinstance(last_message, AssistantMessage):
-				logger.debug('Adding new user task to conversation history')
+				logger.debug('Previous conversation exists, clearing to start fresh with new task: %s', task[:100])
+				self._conversation.clear()
 			elif isinstance(last_message, UserMessage):
-				logger.debug('Last message was user message, not adding duplicate')
+				logger.debug('Last message was user message, clearing conversation for new task')
+				self._conversation.clear()
 		else:
 			logger.debug('Starting new conversation session')
 
 		# Use cached state if available to avoid blocking DOM fetch on task start
-		# This significantly reduces latency - we'll refresh state in the first step if needed
 		used_cached_state = False
 		state = self.controller.last_state
 		if state is None:
@@ -102,14 +103,29 @@ class DirectBrowserAgent:
 		for step in range(1, self.config.max_steps + 1):
 			logger.debug('Agent step %d/%d', step, self.config.max_steps)
 			try:
-				# Refresh state in first step if we used cached state
-				# This ensures we have fresh state for the LLM while avoiding blocking on task start
+				# Refresh state at the start of each step to ensure state matches cached selector_map
 				if step == 1 and used_cached_state:
 					logger.debug('Refreshing browser state for first step (was using cached state)...')
 					try:
 						state = await self.controller.refresh_state(include_dom=True, include_screenshot=False)
 					except Exception as error:  # noqa: BLE001
 						logger.warning('Failed to refresh state in first step, using cached: %s', error)
+						state = self.controller.last_state or state
+				elif step > 1:
+					# Refresh state at start of each step to ensure indices are current
+					await asyncio.sleep(0.1)
+					logger.debug('Refreshing browser state at start of step %d...', step)
+					try:
+						# Add timeout to prevent hanging on state refresh
+						state = await asyncio.wait_for(
+							self.controller.refresh_state(include_dom=True, include_screenshot=False),
+							timeout=30.0
+						)
+					except asyncio.TimeoutError:
+						logger.error('State refresh timed out at start of step %d', step)
+						state = self.controller.last_state or state
+					except Exception as error:  # noqa: BLE001
+						logger.warning('Failed to refresh state at start of step %d: %s', step, error)
 						state = self.controller.last_state or state
 				
 				tab_summary = self._format_tab_summary(state)
@@ -137,13 +153,16 @@ class DirectBrowserAgent:
 				)
 
 			try:
+				logger.debug('Invoking LLM at step %d (conversation length: %d messages)...', step, len(messages))
 				response_text = None
 				last_error = None
 				max_retries = 3
 				for retry_attempt in range(max_retries):
 					try:
+						logger.debug('LLM call attempt %d/%d at step %d...', retry_attempt + 1, max_retries, step)
 						response = await asyncio.wait_for(self.llm.ainvoke(messages), timeout=60.0)
 						response_text = response.completion if hasattr(response, 'completion') else str(response)
+						logger.debug('LLM response received at step %d (length: %d chars)', step, len(response_text) if response_text else 0)
 						break
 					except Exception as error:  # noqa: BLE001
 						last_error = error
@@ -242,13 +261,20 @@ class DirectBrowserAgent:
 			tool_info = self._format_tool_info(action_type, action_payload)
 			
 			if action_type in {'none', 'done', 'await_user_input', 'awaiting_user_input'}:
-				agent_response_text = self._select_final_message(structured)
-				if not agent_response_text:
-					agent_response_text = structured.results[-1] if structured.results else ''
+				# For await_user_input, prioritize narration (conversational response) over results
+				if action_type in {'await_user_input', 'awaiting_user_input'}:
+					agent_response_text = structured.narration[-1] if structured.narration else ''
 					if not agent_response_text:
-						if action_type in {'await_user_input', 'awaiting_user_input'}:
-							agent_response_text = structured.narration[-1] if structured.narration else 'I need your input to continue.'
-						else:
+						agent_response_text = structured.results[-1] if structured.results else ''
+					if not agent_response_text:
+						agent_response_text = self._select_final_message(structured)
+					if not agent_response_text:
+						agent_response_text = 'I need your input to continue.'
+				else:
+					agent_response_text = self._select_final_message(structured)
+					if not agent_response_text:
+						agent_response_text = structured.results[-1] if structured.results else ''
+						if not agent_response_text:
 							agent_response_text = structured.narration[-1] if structured.narration else 'Task completed.'
 			else:
 				agent_response_text = structured.narration[-1] if structured.narration else ''
@@ -278,7 +304,14 @@ class DirectBrowserAgent:
 				)
 
 			if action_type in {'await_user_input', 'awaiting_user_input'}:
-				final_text = self._select_final_message(structured)
+				# Prioritize narration for conversational responses
+				final_text = structured.narration[-1] if structured.narration else ''
+				if not final_text:
+					final_text = structured.results[-1] if structured.results else ''
+				if not final_text:
+					final_text = self._select_final_message(structured)
+				if not final_text:
+					final_text = 'I need your input to continue.'
 				full = self._format_structured(structured)
 				return AgentRunResult(
 					success=False,
@@ -293,9 +326,30 @@ class DirectBrowserAgent:
 			# browser-use Tools will use the cached selector_map which matches the indices
 			# the LLM saw. Do NOT refresh state here as it would create new backend_node_ids
 			# and break the element lookup.
-			result_str = await self._execute_action(action_type, action_payload)
+			logger.debug('Executing action %s at step %d...', action_type, step)
+			try:
+				# Add timeout to prevent hanging on action execution
+				result_str = await asyncio.wait_for(
+					self._execute_action(action_type, action_payload),
+					timeout=45.0
+				)
+				logger.debug('Action %s completed at step %d', action_type, step)
+			except asyncio.TimeoutError:
+				logger.error('Action %s timed out after 45 seconds at step %d', action_type, step)
+				result_str = f'Action {action_type} timed out after 45 seconds'
+			except Exception as error:  # noqa: BLE001
+				logger.error('Action execution failed at step %d: %s', step, error, exc_info=True)
+				result_str = f'Action {action_type} failed: {error}'
 			self._context_log.append(result_str)
 			self._context_log = self._context_log[-20:]
+			
+			# Check if action failed - if so, refresh state immediately to get accurate page info
+			action_failed = (
+				'failed' in result_str.lower() or 
+				'not available' in result_str.lower() or 
+				'Error:' in result_str or 
+				'timed out' in result_str.lower()
+			)
 			
 			# Call step callback AFTER execution (shows result)
 			# Use Result as agent response (what agent says happened)
@@ -311,14 +365,30 @@ class DirectBrowserAgent:
 				except Exception as callback_error:  # noqa: BLE001
 					logger.warning('Step callback error (after): %s', callback_error)
 
-			wait_time = 0.2
-			logger.debug('Waiting %.1fs for page to stabilize before refreshing state...', wait_time)
+			# If action failed, refresh state immediately with minimal wait
+			# Otherwise, wait a bit for page to stabilize
+			if action_failed:
+				wait_time = 0.1
+				logger.debug('Action failed, refreshing state immediately (waiting %.1fs)...', wait_time)
+			else:
+				wait_time = 0.2
+				logger.debug('Waiting %.1fs for page to stabilize before refreshing state...', wait_time)
 			await asyncio.sleep(wait_time)
 			
 			logger.debug('Refreshing browser state to get latest page content...')
 			try:
-				state = await self.controller.refresh_state(include_dom=True, include_screenshot=False)
+				# Add timeout to prevent hanging on state refresh
+				state = await asyncio.wait_for(
+					self.controller.refresh_state(include_dom=True, include_screenshot=False),
+					timeout=30.0
+				)
 				logger.debug('Browser state refreshed successfully (URL: %s)', state.url if state else 'unknown')
+				# Add a small delay after state refresh to ensure DOM and selector_map are fully stable
+				# This helps prevent "element not available" errors when indices should be valid
+				await asyncio.sleep(0.1)
+			except asyncio.TimeoutError:
+				logger.error('State refresh timed out after action execution at step %d', step)
+				state = self.controller.last_state or state
 			except Exception as error:  # noqa: BLE001
 				logger.warning('Failed to refresh browser state: %s', error)
 				state = self.controller.last_state or state
@@ -367,43 +437,99 @@ class DirectBrowserAgent:
 
 	async def _execute_action(self, action_type: str, payload: Dict[str, Any]) -> str:
 		try:
+			result = None
 			if action_type == 'search':
 				query = payload.get('query') or ''
 				engine = payload.get('engine') or self.config.search_engine
 				result = await self.controller.search(query, engine)
-				return result.extracted_content or f"Searched {engine} for '{query}'."
-			if action_type == 'navigate':
+			elif action_type == 'navigate':
 				url = payload.get('url') or ''
 				new_tab = bool(payload.get('new_tab', False))
 				result = await self.controller.navigate(url, new_tab=new_tab)
-				return result.extracted_content or f'Navigated to {url}.'
-			if action_type == 'click':
+			elif action_type == 'click':
 				result = await self.controller.click(
 					index=payload.get('index'),
 					coordinate_x=payload.get('coordinate_x'),
 					coordinate_y=payload.get('coordinate_y'),
 				)
-				return result.extracted_content or 'Clicked element.'
-			if action_type == 'input':
+			elif action_type == 'input':
+				# Add delay before typing to ensure field is ready and prevent missing initial characters
+				await asyncio.sleep(0.5)
 				result = await self.controller.input_text(
 					index=payload.get('index'),
 					text=payload.get('text', ''),
 					clear=bool(payload.get('clear', True)),
 				)
-				return result.extracted_content or 'Entered text.'
-			if action_type == 'scroll':
+			elif action_type == 'scroll':
 				direction = payload.get('direction', 'down')
 				pages = float(payload.get('pages', 1))
 				result = await self.controller.scroll(direction=direction, pages=pages, index=payload.get('index'))
-				return result.extracted_content or f'Scrolled {direction}.'
-			if action_type == 'send_keys':
+			elif action_type == 'send_keys':
 				keys = payload.get('keys', '')
 				result = await self.controller.send_keys(keys)
-				return result.extracted_content or f'Sent keys: {keys}.'
-			if action_type == 'screenshot':
+			elif action_type == 'screenshot':
 				result = await self.controller.screenshot()
-				return result.extracted_content or 'Captured screenshot.'
-			return f'Unsupported action type: {action_type}'
+			else:
+				return f'Unsupported action type: {action_type}'
+			
+			# Check if action failed
+			if result is not None:
+				if result.error:
+					error_msg = f'Action {action_type} failed: {result.error}'
+					if result.extracted_content:
+						error_msg = f'{result.extracted_content} (Error: {result.error})'
+					logger.warning('Action failed: %s', error_msg)
+					return error_msg
+				if result.success is False:
+					error_msg = f'Action {action_type} failed'
+					if result.extracted_content:
+						error_msg = result.extracted_content
+					logger.warning('Action failed: %s', error_msg)
+					return error_msg
+				# Check if extracted_content contains error indicators
+				# (browser-use sometimes puts errors in extracted_content instead of error field)
+				if result.extracted_content:
+					error_indicators = [
+						'not available',
+						'failed',
+						'error',
+						'not found',
+						'could not',
+						'unable to',
+						'may have changed',
+					]
+					content_lower = result.extracted_content.lower()
+					if any(indicator in content_lower for indicator in error_indicators):
+						error_msg = f'Action {action_type} failed: {result.extracted_content}'
+						logger.warning('Action failed (detected in extracted_content): %s', error_msg)
+						return error_msg
+			
+			# Return success message
+			if result and result.extracted_content:
+				return result.extracted_content
+			
+			# Fallback success messages
+			if action_type == 'click':
+				return 'Clicked element.'
+			if action_type == 'input':
+				return 'Entered text.'
+			if action_type == 'search':
+				query = payload.get('query', '')
+				engine = payload.get('engine', self.config.search_engine)
+				return f"Searched {engine} for '{query}'."
+			if action_type == 'navigate':
+				url = payload.get('url', '')
+				return f'Navigated to {url}.'
+			if action_type == 'scroll':
+				direction = payload.get('direction', 'down')
+				return f'Scrolled {direction}.'
+			if action_type == 'send_keys':
+				keys = payload.get('keys', '')
+				return f'Sent keys: {keys}.'
+			if action_type == 'screenshot':
+				return 'Captured screenshot.'
+			
+			return f'Action {action_type} completed.'
 		except Exception as error:  # noqa: BLE001
 			logger.error('Action execution failed: %s', error, exc_info=True)
 			return f'Action {action_type} failed: {error}'

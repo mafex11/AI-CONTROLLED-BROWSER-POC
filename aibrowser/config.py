@@ -14,11 +14,7 @@ load_dotenv()
 
 
 def _parse_float(name: str, default: float) -> Tuple[float, bool]:
-	"""Return environment variable as float when possible, falling back to default.
-
-	Returns a tuple of (value, used_default) where used_default is True when the
-	default value was returned due to a missing or invalid environment variable.
-	"""
+	"""Return environment variable as float when possible, falling back to default.	"""
 	value = os.getenv(name)
 	if value is None or value.strip() == '':
 		return default, True
@@ -30,11 +26,7 @@ def _parse_float(name: str, default: float) -> Tuple[float, bool]:
 
 
 def _parse_int(name: str, default: int) -> Tuple[int, bool]:
-	"""Return environment variable as int when possible, falling back to default.
-
-	Returns a tuple of (value, used_default) where used_default is True when the
-	default value was returned due to a missing or invalid environment variable.
-	"""
+	"""Return environment variable as int when possible, falling back to default."""
 	value = os.getenv(name)
 	if value is None or value.strip() == '':
 		return default, True
