@@ -5,12 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Coroutine, Dict, List, Optional, Union
 
 from browser_use.llm.messages import AssistantMessage, BaseMessage, SystemMessage, UserMessage
 
 from .browser_controller import BrowserController
+from .config import Config
 from .structured_output import StructuredAgentResponse, extract_narrations, parse_structured_response
 from .structured_prompt import AnswerPromptBuilder, ObservationPromptBuilder, StructuredPromptBuilder
 
@@ -22,6 +26,7 @@ class AgentRunConfig:
 	max_steps: int = 25
 	search_engine: str = 'google'
 	max_missing_action_retries: int = 5
+	step_timeout: float = 180.0  # Timeout in seconds for each step (prevents getting stuck)
 
 
 @dataclass
@@ -62,21 +67,42 @@ class DirectBrowserAgent:
 		self._context_log: List[str] = []
 		self._max_conversation_history: int = 50
 
-	async def run(self, task: str) -> AgentRunResult:
-		logger.debug('Starting agent task: %s', task)
+	def _check_step_timeout(self, step: int, step_start_time: float) -> bool:
+		"""Check if step has exceeded timeout. Returns True if timeout exceeded."""
+		step_elapsed = time.time() - step_start_time
+		if step_elapsed > self.config.step_timeout:
+			logger.warning(
+				'Step %d exceeded timeout of %.1fs (took %.1fs). Step may be stuck.',
+				step,
+				self.config.step_timeout,
+				step_elapsed,
+			)
+			return True
+		return False
+
+	async def run(self, task: str, *, is_continuation: bool = False) -> AgentRunResult:
+		logger.debug('Starting agent task: %s (continuation: %s)', task, is_continuation)
 		system_prompt = self.system_prompt_builder.build()
-		self._context_log.clear()
 		
-		if self._conversation:
-			last_message = self._conversation[-1]
-			if isinstance(last_message, AssistantMessage):
-				logger.debug('Previous conversation exists, clearing to start fresh with new task: %s', task[:100])
-				self._conversation.clear()
-			elif isinstance(last_message, UserMessage):
-				logger.debug('Last message was user message, clearing conversation for new task')
-				self._conversation.clear()
+		if is_continuation:
+			# This is a continuation after await_user_input - don't clear conversation
+			logger.debug('Continuing conversation after user input: %s', task[:100])
+			# Add user's response to conversation
+			user_response = UserMessage(content=task)
+			self._conversation.append(user_response)
 		else:
-			logger.debug('Starting new conversation session')
+			# New task - clear context log and conversation
+			self._context_log.clear()
+			if self._conversation:
+				last_message = self._conversation[-1]
+				if isinstance(last_message, AssistantMessage):
+					logger.debug('Previous conversation exists, clearing to start fresh with new task: %s', task[:100])
+					self._conversation.clear()
+				elif isinstance(last_message, UserMessage):
+					logger.debug('Last message was user message, clearing conversation for new task')
+					self._conversation.clear()
+			else:
+				logger.debug('Starting new conversation session')
 
 		# Use cached state if available to avoid blocking DOM fetch on task start
 		used_cached_state = False
@@ -102,6 +128,8 @@ class DirectBrowserAgent:
 
 		for step in range(1, self.config.max_steps + 1):
 			logger.debug('Agent step %d/%d', step, self.config.max_steps)
+			step_start_time = time.time()
+			
 			try:
 				# Refresh state at the start of each step to ensure state matches cached selector_map
 				if step == 1 and used_cached_state:
@@ -130,13 +158,25 @@ class DirectBrowserAgent:
 				
 				tab_summary = self._format_tab_summary(state)
 				context_lines = '\n'.join(self._context_log[-6:])
-				observation = self.observation_builder.build(
-					task=task,
-					tab_summary=tab_summary,
-					extra_context=context_lines,
-				)
+				
+				if is_continuation and step == 1:
+					# For continuation, provide context that user has responded
+					# Include their response in the task context so agent understands what they said
+					continuation_context = f'The user has responded: "{task}". Interpret their response in the context of your previous question. If they said they want to "review" or "check" something, acknowledge this and wait - do NOT repeat actions or fill forms again. If they said "yes" or "go ahead", proceed with the action you asked about.'
+					observation = self.observation_builder.build(
+						task=continuation_context,
+						tab_summary=tab_summary,
+						extra_context=context_lines,
+					)
+				else:
+					observation = self.observation_builder.build(
+						task=task,
+						tab_summary=tab_summary,
+						extra_context=context_lines,
+					)
 
 				messages: List[BaseMessage] = [SystemMessage(content=system_prompt), *self._conversation]
+				# Add observation as user message (for continuation, user response is already in conversation)
 				user_message = UserMessage(content=observation)
 				messages.append(user_message)
 				
@@ -152,12 +192,42 @@ class DirectBrowserAgent:
 					context_log=list(self._context_log),
 				)
 
+			# Check timeout before LLM call
+			if self._check_step_timeout(step, step_start_time):
+				self._context_log.append(f'Step {step} timeout detected before LLM call, refreshing state and continuing')
+				self._context_log = self._context_log[-20:]
+				# Refresh state and continue to next step
+				try:
+					state = await asyncio.wait_for(
+						self.controller.refresh_state(include_dom=True, include_screenshot=True),
+						timeout=30.0
+					)
+				except Exception:  # noqa: BLE001
+					state = self.controller.last_state or state
+				continue
+
 			try:
 				logger.debug('Invoking LLM at step %d (conversation length: %d messages)...', step, len(messages))
 				response_text = None
 				last_error = None
 				max_retries = 3
 				for retry_attempt in range(max_retries):
+					# Check timeout during retries
+					if self._check_step_timeout(step, step_start_time):
+						logger.warning('Step %d timeout during LLM retries, breaking retry loop', step)
+						# If timeout and no response, refresh state and continue to next step
+						if response_text is None:
+							self._context_log.append(f'Step {step} timeout during LLM call, refreshing state and continuing')
+							self._context_log = self._context_log[-20:]
+							try:
+								state = await asyncio.wait_for(
+									self.controller.refresh_state(include_dom=True, include_screenshot=True),
+									timeout=30.0
+								)
+							except Exception:  # noqa: BLE001
+								state = self.controller.last_state or state
+							continue  # Continue to next step
+						break  # We have a response, continue processing
 					try:
 						logger.debug('LLM call attempt %d/%d at step %d...', retry_attempt + 1, max_retries, step)
 						response = await asyncio.wait_for(self.llm.ainvoke(messages), timeout=60.0)
@@ -181,6 +251,18 @@ class DirectBrowserAgent:
 						break
 				
 				if response_text is None:
+					# Check if we should continue due to timeout
+					if self._check_step_timeout(step, step_start_time):
+						self._context_log.append(f'Step {step} timeout after LLM call failure, refreshing state and continuing')
+						self._context_log = self._context_log[-20:]
+						try:
+							state = await asyncio.wait_for(
+								self.controller.refresh_state(include_dom=True, include_screenshot=True),
+								timeout=30.0
+							)
+						except Exception:  # noqa: BLE001
+							state = self.controller.last_state or state
+						continue  # Continue to next step
 					raise last_error if last_error else Exception('LLM invocation failed')
 					
 			except asyncio.TimeoutError:
@@ -218,7 +300,8 @@ class DirectBrowserAgent:
 			logger.debug('LLM response (first 200 chars): %s', response_text[:200])
 			assistant_message = AssistantMessage(content=response_text)
 			
-			if step == 1:
+			if step == 1 and not is_continuation:
+				# Only add initial task to conversation if it's a new task
 				self._conversation.append(user_message)
 				logger.debug('Added user task to conversation history: %s', task[:100])
 			
@@ -322,11 +405,30 @@ class DirectBrowserAgent:
 					context_log=list(self._context_log),
 				)
 
+			# Check timeout before action execution
+			if self._check_step_timeout(step, step_start_time):
+				self._context_log.append(f'Step {step} timeout detected before action execution, refreshing state and continuing')
+				self._context_log = self._context_log[-20:]
+				# Refresh state and continue to next step
+				try:
+					state = await asyncio.wait_for(
+						self.controller.refresh_state(include_dom=True, include_screenshot=True),
+						timeout=30.0
+					)
+				except Exception:  # noqa: BLE001
+					state = self.controller.last_state or state
+				continue
+
 			# Execute action using the state that was shown to the LLM
 			# browser-use Tools will use the cached selector_map which matches the indices
 			# the LLM saw. Do NOT refresh state here as it would create new backend_node_ids
 			# and break the element lookup.
 			logger.debug('Executing action %s at step %d...', action_type, step)
+			
+			# If screenshot saving is enabled, show highlight first, take screenshot, then execute action
+			if Config.SAVE_HIGHLIGHT_SCREENSHOTS and action_type in {'click', 'input'}:
+				await self._preview_and_capture_highlight(action_type, action_payload, step)
+			
 			try:
 				# Add timeout to prevent hanging on action execution
 				result_str = await asyncio.wait_for(
@@ -340,6 +442,30 @@ class DirectBrowserAgent:
 			except Exception as error:  # noqa: BLE001
 				logger.error('Action execution failed at step %d: %s', step, error, exc_info=True)
 				result_str = f'Action {action_type} failed: {error}'
+			
+			if result_str is None:
+				result_str = f'Action {action_type} failed: unknown error'
+			
+			# Check if this is an element error - if so, refresh DOM immediately before continuing
+			element_changed = self._is_element_error(result_str)
+			if element_changed:
+				logger.warning('Element error detected, immediately refreshing DOM to get current element indices...')
+				self._context_log.append('Element error detected - page structure changed, refreshing DOM immediately')
+				self._context_log = self._context_log[-20:]
+				
+				# Immediately refresh state with screenshot
+				await asyncio.sleep(0.2)  # Brief wait for page to stabilize
+				try:
+					state = await asyncio.wait_for(
+						self.controller.refresh_state(include_dom=True, include_screenshot=True),
+						timeout=30.0
+					)
+					logger.debug('DOM refreshed after element error (URL: %s)', state.url if state else 'unknown')
+					await asyncio.sleep(0.1)  # Small delay after refresh
+				except Exception as refresh_error:  # noqa: BLE001
+					logger.warning('Failed to refresh state after element error: %s', refresh_error)
+					state = self.controller.last_state or state
+			
 			self._context_log.append(result_str)
 			self._context_log = self._context_log[-20:]
 			
@@ -351,15 +477,27 @@ class DirectBrowserAgent:
 				'timed out' in result_str.lower()
 			)
 			
-			# Detect element-related errors that indicate page structure changed
-			element_changed = self._is_element_error(result_str)
-			if element_changed:
-				self._context_log.append('Element error detected - page structure may have changed, refreshing DOM and screenshot')
-				self._context_log = self._context_log[-20:]
+			# Note: element_changed was already checked and DOM refreshed above if needed
 			
 			# Call step callback AFTER execution (shows result)
 			# Use Result as agent response (what agent says happened)
-			after_response = structured.results[-1] if structured.results else agent_response_text
+			# But if action failed, don't use the optimistic narration - use the actual result
+			action_succeeded = not (
+				'failed' in result_str.lower() or 
+				'not available' in result_str.lower() or 
+				'Error:' in result_str or 
+				'timed out' in result_str.lower()
+			)
+			
+			if action_succeeded:
+				after_response = structured.results[-1] if structured.results else agent_response_text
+			else:
+				# Action failed - use error message, don't claim success
+				if element_changed:
+					after_response = f'Element not found - page may have changed. Refreshed DOM to get current elements.'
+				else:
+					after_response = result_str if result_str else agent_response_text
+			
 			if not after_response:
 				after_response = f'{tool_info} → {result_str[:50]}'
 			if self.step_callback:
@@ -371,39 +509,65 @@ class DirectBrowserAgent:
 				except Exception as callback_error:  # noqa: BLE001
 					logger.warning('Step callback error (after): %s', callback_error)
 
-			# If action failed, refresh state immediately with minimal wait
-			# Otherwise, wait a bit for page to stabilize
-			if action_failed:
-				wait_time = 0.1
-				logger.debug('Action failed, refreshing state immediately (waiting %.1fs)...', wait_time)
-			else:
-				wait_time = 0.2
-				logger.debug('Waiting %.1fs for page to stabilize before refreshing state...', wait_time)
-			await asyncio.sleep(wait_time)
-			
-			# If element changed/not found, include screenshot to help agent see what changed
-			include_screenshot = element_changed
-			if element_changed:
-				logger.debug('Element error detected, refreshing state with screenshot to capture current page state...')
-			else:
+			# If element error was already handled above, skip the normal refresh
+			# Otherwise, refresh state normally
+			if not element_changed:
+				# If action failed, refresh state immediately with minimal wait
+				# Otherwise, wait a bit for page to stabilize
+				if action_failed:
+					wait_time = 0.1
+					logger.debug('Action failed, refreshing state immediately (waiting %.1fs)...', wait_time)
+				else:
+					wait_time = 0.2
+					logger.debug('Waiting %.1fs for page to stabilize before refreshing state...', wait_time)
+				await asyncio.sleep(wait_time)
+				
 				logger.debug('Refreshing browser state to get latest page content...')
+				try:
+					# Add timeout to prevent hanging on state refresh
+					state = await asyncio.wait_for(
+						self.controller.refresh_state(include_dom=True, include_screenshot=False),
+						timeout=30.0
+					)
+					logger.debug('Browser state refreshed successfully (URL: %s)', state.url if state else 'unknown')
+					# Add a small delay after state refresh to ensure DOM and selector_map are fully stable
+					# This helps prevent "element not available" errors when indices should be valid
+					await asyncio.sleep(0.1)
+				except asyncio.TimeoutError:
+					logger.error('State refresh timed out after action execution at step %d', step)
+					state = self.controller.last_state or state
+				except Exception as error:  # noqa: BLE001
+					logger.warning('Failed to refresh browser state: %s', error)
+					state = self.controller.last_state or state
+			else:
+				# Element error was already handled - DOM was refreshed above with screenshot
+				logger.debug('Skipping normal state refresh - already refreshed after element error')
 			
-			try:
-				# Add timeout to prevent hanging on state refresh
-				state = await asyncio.wait_for(
-					self.controller.refresh_state(include_dom=True, include_screenshot=include_screenshot),
-					timeout=30.0
+			# Check if step exceeded timeout (stuck detection)
+			step_elapsed = time.time() - step_start_time
+			if step_elapsed > self.config.step_timeout:
+				logger.warning(
+					'Step %d exceeded timeout of %.1fs (took %.1fs). Step may be stuck. Refreshing state and continuing to next step.',
+					step,
+					self.config.step_timeout,
+					step_elapsed,
 				)
-				logger.debug('Browser state refreshed successfully (URL: %s)', state.url if state else 'unknown')
-				# Add a small delay after state refresh to ensure DOM and selector_map are fully stable
-				# This helps prevent "element not available" errors when indices should be valid
-				await asyncio.sleep(0.1)
-			except asyncio.TimeoutError:
-				logger.error('State refresh timed out after action execution at step %d', step)
-				state = self.controller.last_state or state
-			except Exception as error:  # noqa: BLE001
-				logger.warning('Failed to refresh browser state: %s', error)
-				state = self.controller.last_state or state
+				self._context_log.append(f'Step {step} exceeded timeout ({step_elapsed:.1f}s), refreshing state and continuing')
+				self._context_log = self._context_log[-20:]
+				
+				# Refresh state with screenshot to help agent see current state
+				try:
+					state = await asyncio.wait_for(
+						self.controller.refresh_state(include_dom=True, include_screenshot=True),
+						timeout=30.0
+					)
+					logger.debug('State refreshed after step timeout (URL: %s)', state.url if state else 'unknown')
+				except Exception as error:  # noqa: BLE001
+					logger.warning('Failed to refresh state after timeout: %s', error)
+					state = self.controller.last_state or state
+				
+				# Continue to next step instead of getting stuck
+				continue
 
 		return AgentRunResult(
 			success=False,
@@ -578,6 +742,68 @@ class DirectBrowserAgent:
 		except Exception as error:  # noqa: BLE001
 			logger.error('Action execution failed: %s', error, exc_info=True)
 			return f'Action {action_type} failed: {error}'
+
+	async def _preview_and_capture_highlight(self, action_type: str, payload: Dict[str, Any], step: int) -> None:
+		"""Show highlight indicator, wait for it to appear, take screenshot, then action will execute."""
+		if not Config.SAVE_HIGHLIGHT_SCREENSHOTS:
+			return
+		
+		try:
+			node = None
+			
+			# Get the element node to highlight
+			if action_type == 'click' and payload.get('index') is not None:
+				node = await self.controller.browser_session.get_element_by_index(payload['index'])
+			elif action_type == 'input' and payload.get('index') is not None:
+				node = await self.controller.browser_session.get_element_by_index(payload['index'])
+			elif action_type == 'click' and payload.get('coordinate_x') is not None:
+				# For coordinate clicks, we can't easily get the node, so skip preview
+				logger.debug('Coordinate-based click - skipping highlight preview')
+				return
+			
+			if not node:
+				logger.warning('Could not find element node for highlight preview')
+				return
+			
+			# Show highlight indicator before executing action
+			await self.controller.browser_session.highlight_interaction_element(node)
+			
+			# Wait for highlight to fully appear and be visible
+			await asyncio.sleep(Config.HIGHLIGHT_SCREENSHOT_DELAY)
+			
+			# Create screenshot directory if it doesn't exist
+			screenshot_dir = Path(Config.SCREENSHOT_DIR)
+			screenshot_dir.mkdir(parents=True, exist_ok=True)
+			
+			# Generate filename with timestamp, step, and action details
+			timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]  # Include milliseconds
+			
+			# Add action-specific info to filename
+			action_info = action_type
+			if action_type == 'click' and payload.get('index') is not None:
+				action_info = f'click_idx{payload["index"]}'
+			elif action_type == 'input' and payload.get('index') is not None:
+				action_info = f'input_idx{payload["index"]}'
+			
+			filename = f'highlight_{action_info}_step{step}_{timestamp}.png'
+			screenshot_path = screenshot_dir / filename
+			
+			# Take screenshot with highlight visible
+			await self.controller.browser_session.take_screenshot(
+				path=str(screenshot_path),
+				full_page=False,
+				format='png',
+			)
+			
+			logger.debug('Captured highlight screenshot (before action): %s', screenshot_path)
+			
+			# Note: Highlight will automatically fade after configured duration
+			# The actual action will execute next, which may trigger another highlight
+			# but this one captures the preview state
+			
+		except Exception as error:  # noqa: BLE001
+			# Don't fail the action if screenshot capture fails
+			logger.warning('Failed to preview and capture highlight screenshot: %s', error)
 
 	def _select_final_message(self, structured: StructuredAgentResponse) -> str:
 		best = structured.best_message()

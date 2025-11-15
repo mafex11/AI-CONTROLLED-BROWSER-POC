@@ -31,6 +31,7 @@ class AgentBridge:
 		self._current_task: Optional[asyncio.Task] = None
 		self._tts_processor = None
 		self._speech_tracker = None
+		self._awaiting_user_input = False
 
 	async def process_user_text(self, text: str) -> None:
 		"""Process user speech transcript and run agent."""
@@ -56,22 +57,37 @@ class AgentBridge:
 
 		if self.on_user_speech:
 			try:
-				self.on_user_speech(text)
+				if asyncio.iscoroutinefunction(self.on_user_speech):
+					await self.on_user_speech(text)
+				else:
+					self.on_user_speech(text)
 			except Exception as e:
 				logger.warning('Error in on_user_speech callback: %s', e)
 
+		# Check if we're continuing a conversation after await_user_input
+		is_continuation = self._awaiting_user_input
+		
 		if self._processing and self._current_task:
-			logger.info('Cancelling previous agent task due to new user input')
-			self._current_task.cancel()
-			try:
-				await self._current_task
-			except asyncio.CancelledError:
-				pass
+			if is_continuation:
+				logger.info('Continuing conversation after user input: %s', text)
+				# Wait for current task to finish (it should have already returned with awaiting_user_input=True)
+				try:
+					await self._current_task
+				except Exception as e:
+					logger.warning('Error waiting for previous task: %s', e)
+			else:
+				logger.info('Cancelling previous agent task due to new user input')
+				self._current_task.cancel()
+				try:
+					await self._current_task
+				except asyncio.CancelledError:
+					pass
 
 		self._processing = True
-		self._current_task = asyncio.create_task(self._run_agent(text))
+		self._awaiting_user_input = False  # Reset flag when processing new input
+		self._current_task = asyncio.create_task(self._run_agent(text, is_continuation=is_continuation))
 
-	async def _run_agent(self, query: str) -> None:
+	async def _run_agent(self, query: str, *, is_continuation: bool = False) -> None:
 		"""Run the agent and send responses to TTS."""
 		try:
 			def narration_callback(narration: str) -> None:
@@ -254,24 +270,48 @@ class AgentBridge:
 			original_narration = self.integration.narration_callback
 			original_step = self.integration.step_callback
 
+			# Create a chained step callback that calls both original and TTS callback
+			async def chained_step_callback(step: int, reasoning: str, narration: str, tool: str, phase: str) -> None:
+				# First call the original step callback (for WebSocket updates)
+				if original_step:
+					try:
+						if asyncio.iscoroutinefunction(original_step):
+							await original_step(step, reasoning, narration, tool, phase)
+						else:
+							original_step(step, reasoning, narration, tool, phase)
+					except Exception as e:
+						logger.debug('Error in original step callback: %s', e)
+				
+				# Then call the TTS step callback
+				await step_callback(step, reasoning, narration, tool, phase)
+
 			self.integration.update_callbacks(
 				narration_callback=narration_callback,
-				step_callback=step_callback,
+				step_callback=chained_step_callback,
 			)
 
 			try:
-				result = await self.integration.run(query)
+				result = await self.integration.run(query, is_continuation=is_continuation)
+				
+				# Track if agent is awaiting user input
+				self._awaiting_user_input = result.get('awaiting_user_input', False)
 
 				if self.on_agent_response:
 					try:
-						self.on_agent_response(result.get('message', ''))
+						if asyncio.iscoroutinefunction(self.on_agent_response):
+							await self.on_agent_response(result.get('message', ''))
+						else:
+							self.on_agent_response(result.get('message', ''))
 					except Exception as e:
 						logger.warning('Error in on_agent_response callback: %s', e)
 
 			finally:
+				# Restore both callbacks to their original state
+				# This ensures we don't create a chain of chains (which causes duplicate TTS)
+				# The step_callback will be re-chained on the next agent run
 				self.integration.update_callbacks(
 					narration_callback=original_narration,
-					step_callback=original_step,
+					step_callback=original_step,  # Restore original (WebSocket) callback
 				)
 
 		except asyncio.CancelledError:

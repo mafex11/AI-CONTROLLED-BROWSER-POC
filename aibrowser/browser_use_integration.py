@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from browser_use.browser.profile import BrowserProfile
 from browser_use.browser.session import BrowserSession
 from browser_use.llm.google.chat import ChatGoogle
 from browser_use.tools.service import Tools
@@ -123,11 +124,11 @@ class BrowserUseIntegration:
 			self._initialized = False
 			return False
 
-	async def run(self, command: str) -> Dict[str, Any]:
+	async def run(self, command: str, *, is_continuation: bool = False) -> Dict[str, Any]:
 		if not self._initialized or not self._state:
 			raise RuntimeError('BrowserUseIntegration is not initialized.')
 
-		result = await self._state.agent.run(command)
+		result = await self._state.agent.run(command, is_continuation=is_continuation)
 		payload: Dict[str, Any] = {
 			'success': result.success,
 			'awaiting_user_input': result.awaiting_user_input,
@@ -192,9 +193,18 @@ class BrowserUseIntegration:
 		if not self.cdp_url:
 			raise RuntimeError('cdp_url is required to connect to Chromium.')
 
+		# Create custom browser profile with highlight customization
+		browser_profile = BrowserProfile(
+			highlight_elements=Config.HIGHLIGHT_ELEMENTS,
+			dom_highlight_elements=Config.DOM_HIGHLIGHT_ELEMENTS,
+			interaction_highlight_color=Config.INTERACTION_HIGHLIGHT_COLOR,
+			interaction_highlight_duration=Config.INTERACTION_HIGHLIGHT_DURATION,
+		)
+
 		session = BrowserSession(
 			cdp_url=self.cdp_url,
 			is_local=False,
+			browser_profile=browser_profile,
 		)
 		await session.start()
 		await asyncio.sleep(0.1)

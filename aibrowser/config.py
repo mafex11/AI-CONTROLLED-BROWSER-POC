@@ -78,6 +78,19 @@ class Config:
 	ELEVENLABS_VOICE_ID: str = os.getenv('ELEVENLABS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM')  # Default: Rachel
 	DEEPGRAM_LANGUAGE: str = os.getenv('DEEPGRAM_LANGUAGE', 'en-US')
 
+	# Browser highlighting customization
+	HIGHLIGHT_ELEMENTS: bool = os.getenv('HIGHLIGHT_ELEMENTS', 'true').lower() in {'true', '1', 'yes'}
+	DOM_HIGHLIGHT_ELEMENTS: bool = os.getenv('DOM_HIGHLIGHT_ELEMENTS', 'false').lower() in {'true', '1', 'yes'}
+	INTERACTION_HIGHLIGHT_COLOR: str = os.getenv('INTERACTION_HIGHLIGHT_COLOR', 'rgb(255, 127, 39)').strip()  # Orange default
+	_INTERACTION_HIGHLIGHT_DURATION, _ = _parse_float('INTERACTION_HIGHLIGHT_DURATION', 1.0)
+	INTERACTION_HIGHLIGHT_DURATION: float = _INTERACTION_HIGHLIGHT_DURATION
+
+	# Screenshot saving configuration
+	SAVE_HIGHLIGHT_SCREENSHOTS: bool = os.getenv('SAVE_HIGHLIGHT_SCREENSHOTS', 'false').lower() in {'true', '1', 'yes'}
+	SCREENSHOT_DIR: str = os.getenv('SCREENSHOT_DIR', './screenshots').strip()
+	_HIGHLIGHT_SCREENSHOT_DELAY, _ = _parse_float('HIGHLIGHT_SCREENSHOT_DELAY', 0.5)
+	HIGHLIGHT_SCREENSHOT_DELAY: float = _HIGHLIGHT_SCREENSHOT_DELAY  # Delay in seconds to wait for highlight to appear before screenshot
+
 	@classmethod
 	def validate(cls) -> bool:
 		"""Ensure required keys exist before running."""
