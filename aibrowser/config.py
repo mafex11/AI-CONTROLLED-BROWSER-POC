@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+from typing import Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -13,28 +13,36 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 
-def _parse_float(name: str) -> Optional[float]:
-	"""Return environment variable as float when possible."""
+def _parse_float(name: str, default: float) -> Tuple[float, bool]:
+	"""Return environment variable as float when possible, falling back to default.
+
+	Returns a tuple of (value, used_default) where used_default is True when the
+	default value was returned due to a missing or invalid environment variable.
+	"""
 	value = os.getenv(name)
 	if value is None or value.strip() == '':
-		return None
+		return default, True
 	try:
-		return float(value)
+		return float(value), False
 	except ValueError:
 		logger.warning('Ignoring invalid float for %s: %s', name, value)
-		return None
+		return default, True
 
 
-def _parse_int(name: str) -> Optional[int]:
-	"""Return environment variable as int when possible."""
+def _parse_int(name: str, default: int) -> Tuple[int, bool]:
+	"""Return environment variable as int when possible, falling back to default.
+
+	Returns a tuple of (value, used_default) where used_default is True when the
+	default value was returned due to a missing or invalid environment variable.
+	"""
 	value = os.getenv(name)
 	if value is None or value.strip() == '':
-		return None
+		return default, True
 	try:
-		return int(value)
+		return int(value), False
 	except ValueError:
 		logger.warning('Ignoring invalid integer for %s: %s', name, value)
-		return None
+		return default, True
 
 
 class Config:
@@ -47,10 +55,19 @@ class Config:
 
 	GEMINI_API_KEY: str = os.getenv('GEMINI_API_KEY', '')
 	GEMINI_MODEL: str = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
-	GEMINI_TEMPERATURE: float = float(os.getenv('GEMINI_TEMPERATURE', '0.3'))
-	GEMINI_MAX_OUTPUT_TOKENS: int = int(os.getenv('GEMINI_MAX_OUTPUT_TOKENS', '8000'))
-	GEMINI_TOP_P: Optional[float] = _parse_float('GEMINI_TOP_P')
-	GEMINI_TOP_K: Optional[int] = _parse_int('GEMINI_TOP_K')
+
+	# Robust parsing with sane defaults so misconfigured env vars do not crash startup.
+	_GEMINI_TEMPERATURE, _ = _parse_float('GEMINI_TEMPERATURE', 0.3)
+	GEMINI_TEMPERATURE: float = _GEMINI_TEMPERATURE
+
+	_GEMINI_MAX_OUTPUT_TOKENS, _ = _parse_int('GEMINI_MAX_OUTPUT_TOKENS', 8000)
+	GEMINI_MAX_OUTPUT_TOKENS: int = _GEMINI_MAX_OUTPUT_TOKENS
+
+	_GEMINI_TOP_P, used_default_top_p = _parse_float('GEMINI_TOP_P', 0.0)
+	GEMINI_TOP_P: Optional[float] = None if used_default_top_p else _GEMINI_TOP_P
+
+	_GEMINI_TOP_K, used_default_top_k = _parse_int('GEMINI_TOP_K', 0)
+	GEMINI_TOP_K: Optional[int] = None if used_default_top_k else _GEMINI_TOP_K
 
 	DEFAULT_SEARCH_ENGINE: str = os.getenv('DEFAULT_SEARCH_ENGINE', 'google').strip().lower() or 'google'
 
@@ -58,9 +75,10 @@ class Config:
 	SYSTEM_PROMPT_TEXT: str | None = os.getenv('SYSTEM_PROMPT') or None
 
 	DEFAULT_SYSTEM_PROMPT: str = (
-		'You are a focused AI that automates a Chromium browser to help the user.\n'
-		'Always narrate what you are doing, use natural first-person language, and keep responses brief.\n'
-		'If the task completes without further browser actions, say so explicitly.'
+		'You control a real Chromium browser to help the user with web tasks only.\n'
+		"Your job is to understand the user's browser task, decide the next best browser action, and describe it clearly.\n"
+		'You never answer questions that are unrelated to using the browser or the content of the current web pages.\n'
+		'Short greetings are fine, but always steer the conversation back to what to do in the browser.'
 	)
 
 	ELEVENLABS_API_KEY: str = os.getenv('ELEVENLABS_API_KEY', '')

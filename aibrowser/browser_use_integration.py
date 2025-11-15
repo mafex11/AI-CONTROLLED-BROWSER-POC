@@ -127,6 +127,11 @@ class BrowserUseIntegration:
 		if not self._initialized or not self._state:
 			raise RuntimeError('BrowserUseIntegration is not initialized.')
 
+		normalized = command.strip().lower()
+
+		if self._is_describe_page_command(normalized):
+			return await self._describe_current_page()
+
 		result = await self._state.agent.run(command)
 		payload: Dict[str, Any] = {
 			'success': result.success,
@@ -204,4 +209,54 @@ class BrowserUseIntegration:
 		# Reduced delay - session.start() already handles initialization
 		await asyncio.sleep(0.1)
 		return session
+
+	def _is_describe_page_command(self, normalized: str) -> bool:
+		phrases = [
+			"describe what's on the page",
+			'describe whats on the page',
+			'describe the page',
+			"what's on the page",
+			'whats on the page',
+			'what is on the page',
+			'what do you see on the page',
+			'what do you see',
+			'describe the screen',
+		]
+		return any(phrase in normalized for phrase in phrases)
+
+	async def _describe_current_page(self) -> Dict[str, Any]:
+		if not self._state:
+			raise RuntimeError('BrowserUseIntegration is not initialized.')
+
+		controller = self._state.controller
+		agent = self._state.agent
+
+		state = controller.last_state
+		try:
+			state = await controller.refresh_state(include_dom=True, include_screenshot=False)
+		except Exception:
+			# Fall back to last known state if refresh fails
+			pass
+
+		description = ''
+		if state is not None:
+			try:
+				description = agent._extract_page_info(state)  # type: ignore[attr-defined]
+			except Exception:
+				try:
+					description = agent._format_tab_summary(state)  # type: ignore[attr-defined]
+				except Exception:
+					description = 'Unable to read current page state.'
+		else:
+			description = 'No page state available.'
+
+		return {
+			'success': True,
+			'awaiting_user_input': False,
+			'message': description,
+			'structured_message': description,
+			'context': [],
+			'final_url': getattr(state, 'url', None) if state is not None else None,
+			'final_title': getattr(state, 'title', None) if state is not None else None,
+		}
 
