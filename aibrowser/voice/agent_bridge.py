@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class AgentBridge:
-	"""Bridges Pipecat text frames to the browser agent and back."""
+	"""Bridges Pipecat text frames to browser agent."""
 
 	def __init__(
 		self,
@@ -91,7 +91,7 @@ class AgentBridge:
 		self._current_task = asyncio.create_task(self._run_agent(text, is_continuation=is_continuation))
 
 	async def _run_agent(self, query: str, *, is_continuation: bool = False) -> None:
-		"""Run the agent and send responses to TTS."""
+		"""Run agent and send responses to TTS."""
 		try:
 			def narration_callback(narration: str) -> None:
 				pass
@@ -100,7 +100,7 @@ class AgentBridge:
 			_step_counter = 0
 			
 			async def step_callback(step: int, reasoning: str, narration: str, tool: str, phase: str) -> None:
-				"""Handle step callbacks with detailed, conversational narration."""
+				"""Handle step callbacks with conversational narration."""
 				nonlocal _last_tts_message, _step_counter, query
 				
 				def tool_to_natural(t: str) -> str:
@@ -325,7 +325,7 @@ class AgentBridge:
 		self._speech_tracker = tracker
 
 	async def _send_to_tts(self, text: str) -> None:
-		"""Queue text for TTS processing to ensure sequential playback."""
+		"""Queue text for TTS processing."""
 		if not text or not text.strip():
 			logger.debug('_send_to_tts: Empty text, skipping')
 			return
@@ -347,7 +347,7 @@ class AgentBridge:
 			self._tts_task = asyncio.create_task(self._process_tts_queue())
 	
 	async def _process_tts_queue(self) -> None:
-		"""Process TTS queue sequentially to prevent overlapping audio."""
+		"""Process TTS queue sequentially."""
 		try:
 			while True:
 				try:

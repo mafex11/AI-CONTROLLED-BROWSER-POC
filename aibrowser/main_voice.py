@@ -19,7 +19,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def setup_logging() -> None:
-	"""Configure clean, consistent logging for the application."""
+	"""Configure logging for the application."""
 	log_format = '%(levelname)-8s | %(message)s'
 	logging.basicConfig(level=logging.INFO, format=log_format, datefmt='')
 	
@@ -37,18 +37,18 @@ def setup_logging() -> None:
 
 async def voice_loop(integration: BrowserUseIntegration) -> None:
 	"""Main voice interaction loop."""
-	print('\n' + '=' * 60)
-	print('AI Browser Voice Mode')
-	print('=' * 60)
-	print('Speak your browser task. Say "exit" or "quit" to stop.')
-	print('=' * 60 + '\n')
+	LOGGER.info('\n' + '=' * 60)
+	LOGGER.info('AI Browser Voice Mode')
+	LOGGER.info('=' * 60)
+	LOGGER.info('Speak your browser task. Say "exit" or "quit" to stop.')
+	LOGGER.info('=' * 60 + '\n')
 
 	def on_user_speech(text: str) -> None:
-		print(f'\n[You] {text}')
+		LOGGER.info(f'\n[You] {text}')
 
 	def on_agent_response(text: str) -> None:
 		if text:
-			print(f'[Agent] {text}')
+			LOGGER.info(f'[Agent] {text}')
 
 	agent_bridge = AgentBridge(
 		integration=integration,
@@ -65,20 +65,20 @@ async def voice_loop(integration: BrowserUseIntegration) -> None:
 	)
 
 	if not await pipeline.initialize():
-		print('Failed to initialize voice pipeline.')
+		LOGGER.error('Failed to initialize voice pipeline.')
 		sys.exit(1)
 
 	try:
-		print('Voice pipeline started. Listening...\n')
+		LOGGER.info('Voice pipeline started. Listening...\n')
 		await pipeline.run()
 	except KeyboardInterrupt:
-		print('\nStopping voice pipeline...')
+		LOGGER.info('\nStopping voice pipeline...')
 	except Exception as e:
 		LOGGER.error('Error in voice loop: %s', e, exc_info=True)
 		raise
 	finally:
 		await pipeline.stop()
-		print('Voice pipeline stopped.')
+		LOGGER.info('Voice pipeline stopped.')
 
 
 async def main() -> None:
@@ -99,7 +99,7 @@ async def main() -> None:
 	try:
 		started = await manager.start()
 		if not started or manager.endpoint is None:
-			print('Failed to start Chromium. Ensure Chrome is installed or Playwright is available.')
+			LOGGER.error('Failed to start Chromium. Ensure Chrome is installed or Playwright is available.')
 			sys.exit(1)
 
 		version_url = f'{manager.endpoint}/json/version'
@@ -108,17 +108,17 @@ async def main() -> None:
 			async with aiohttp.ClientSession() as session:
 				async with session.get(version_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
 					if resp.status != 200:
-						print(f'CDP endpoint returned status {resp.status}. Chrome may not be ready.')
+						LOGGER.error(f'CDP endpoint returned status {resp.status}. Chrome may not be ready.')
 						sys.exit(1)
 					data = await resp.json()
 					ws_url = data.get('webSocketDebuggerUrl')
 					if not ws_url:
-						print('CDP endpoint did not provide WebSocket URL.')
+						LOGGER.error('CDP endpoint did not provide WebSocket URL.')
 						sys.exit(1)
-					print(f'CDP endpoint ready: {manager.endpoint}')
-					print(f'WebSocket URL: {ws_url}')
+					LOGGER.info(f'CDP endpoint ready: {manager.endpoint}')
+					LOGGER.info(f'WebSocket URL: {ws_url}')
 		except Exception as e:
-			print(f'Failed to verify CDP endpoint: {e}')
+			LOGGER.error(f'Failed to verify CDP endpoint: {e}')
 			sys.exit(1)
 
 		integration = BrowserUseIntegration(
@@ -126,7 +126,7 @@ async def main() -> None:
 			default_search_engine=Config.DEFAULT_SEARCH_ENGINE,
 		)
 		if not await integration.initialize():
-			print('Failed to initialize browser-use integration.')
+			LOGGER.error('Failed to initialize browser-use integration.')
 			sys.exit(1)
 
 		await voice_loop(integration)
@@ -139,5 +139,5 @@ if __name__ == '__main__':
 	try:
 		asyncio.run(main())
 	except KeyboardInterrupt:
-		print('\nInterrupted.')
+		LOGGER.info('\nInterrupted.')
 

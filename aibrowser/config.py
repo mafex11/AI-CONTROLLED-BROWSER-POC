@@ -14,7 +14,7 @@ load_dotenv()
 
 
 def _parse_float(name: str, default: float) -> Tuple[float, bool]:
-	"""Return environment variable as float when possible, falling back to default.	"""
+	"""Return environment variable as float or default."""
 	value = os.getenv(name)
 	if value is None or value.strip() == '':
 		return default, True
@@ -26,7 +26,7 @@ def _parse_float(name: str, default: float) -> Tuple[float, bool]:
 
 
 def _parse_int(name: str, default: int) -> Tuple[int, bool]:
-	"""Return environment variable as int when possible, falling back to default."""
+	"""Return environment variable as int or default."""
 	value = os.getenv(name)
 	if value is None or value.strip() == '':
 		return default, True
@@ -38,7 +38,7 @@ def _parse_int(name: str, default: int) -> Tuple[int, bool]:
 
 
 class Config:
-	"""Centralized configuration for LLM and browser settings."""
+	"""Configuration for LLM and browser settings."""
 
 	LLM_PROVIDER: str = os.getenv('LLM_PROVIDER', 'gemini').strip().lower() or 'gemini'
 	if LLM_PROVIDER not in {'gemini', 'claude', 'openai', 'none'}:
@@ -128,7 +128,7 @@ class Config:
 
 	@classmethod
 	def validate(cls) -> bool:
-		"""Ensure required keys exist before running."""
+		"""Validate required keys exist."""
 		if cls.LLM_PROVIDER == 'gemini' and not cls.GEMINI_API_KEY:
 			logger.error('Missing GEMINI_API_KEY. Set it in your environment.')
 			return False
@@ -142,7 +142,7 @@ class Config:
 
 	@classmethod
 	def validate_voice(cls) -> bool:
-		"""Validate voice integration API keys."""
+		"""Validate voice API keys."""
 		if not cls.ELEVENLABS_API_KEY:
 			logger.error('Missing ELEVENLABS_API_KEY. Set it in your environment.')
 			return False
@@ -153,7 +153,7 @@ class Config:
 
 	@classmethod
 	def system_prompt(cls) -> str:
-		"""Return the configured system prompt."""
+		"""Return configured system prompt."""
 		if cls.SYSTEM_PROMPT_FILE:
 			try:
 				with open(cls.SYSTEM_PROMPT_FILE, 'r', encoding='utf-8') as handle:

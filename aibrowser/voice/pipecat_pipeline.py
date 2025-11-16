@@ -32,7 +32,7 @@ TEXT_TO_AGENT_BUFFER_DELAY_SECONDS = 0.05
 
 
 class TextToAgentProcessor(FrameProcessor):
-	"""Processor that takes STT text frames and sends them to the agent bridge."""
+	"""Processor that sends STT text frames to agent bridge."""
 
 	def __init__(self, agent_bridge: AgentBridge, silence_delay: float = TEXT_TO_AGENT_BUFFER_DELAY_SECONDS) -> None:
 		super().__init__()
@@ -95,7 +95,7 @@ class TextToAgentProcessor(FrameProcessor):
 		await self.push_frame(frame, direction)
 	
 	async def _process_transcription_after_silence(self) -> None:
-		"""Wait for silence_delay seconds, then process accumulated transcription if no new one arrived."""
+		"""Wait for silence then process accumulated transcription."""
 		try:
 			await asyncio.sleep(self.silence_delay)
 			
@@ -118,7 +118,7 @@ class TextToAgentProcessor(FrameProcessor):
 			logger.error('Error processing transcription after silence: %s', e, exc_info=True)
 	
 	def _process_transcription(self) -> None:
-		"""Process the accumulated transcription by sending it to the agent bridge."""
+		"""Process accumulated transcription by sending to agent bridge."""
 		if not self._accumulated_transcription:
 			return
 		
@@ -132,7 +132,7 @@ class TextToAgentProcessor(FrameProcessor):
 			asyncio.create_task(self.agent_bridge.process_user_text(full_text))
 	
 	def _merge_transcription_chunks(self, chunks: list[str]) -> str:
-		"""Merge transcription chunks, handling overlaps and duplicates."""
+		"""Merge transcription chunks handling overlaps."""
 		if not chunks:
 			return ''
 		if len(chunks) == 1:
@@ -166,7 +166,7 @@ class TextToAgentProcessor(FrameProcessor):
 
 
 class SpeechCompletionTracker(FrameProcessor):
-	"""Tracks speech state and provides awaitable completion."""
+	"""Tracks speech state and provides completion."""
 	
 	def __init__(self) -> None:
 		super().__init__()
@@ -177,7 +177,7 @@ class SpeechCompletionTracker(FrameProcessor):
 		self._speech_silence_timer: Optional[asyncio.Task] = None
 	
 	async def wait_for_speech_completion(self, timeout: float = 60.0) -> None:
-		"""Waits for speech to start, then complete."""
+		"""Wait for speech to start then complete."""
 		logger.debug('Waiting for speech to start and complete...')
 		
 		if not self._is_speaking:
@@ -222,7 +222,7 @@ class SpeechCompletionTracker(FrameProcessor):
 				completion_future.cancel()
 	
 	async def _check_speech_complete(self) -> None:
-		"""Check if speech has been silent long enough to consider it complete."""
+		"""Check if speech has been silent long enough."""
 		await asyncio.sleep(0.3)
 		
 		if not self._is_speaking and self._speech_chunk_count == 0:
@@ -268,7 +268,7 @@ class AudioStreamProcessor(FrameProcessor):
 		self._websocket_sender = websocket_sender
 
 	def set_websocket_sender(self, sender) -> None:
-		"""Set the WebSocket sender function."""
+		"""Set WebSocket sender function."""
 		self._websocket_sender = sender
 
 	async def process_frame(self, frame, direction: FrameDirection) -> None:
@@ -318,13 +318,13 @@ class AudioStreamProcessor(FrameProcessor):
 
 
 class AgentToTTSProcessor(FrameProcessor):
-	"""Takes text from agent and sends it to TTS."""
+	"""Sends text from agent to TTS."""
 
 	def __init__(self) -> None:
 		super().__init__()
 
 	async def send_text(self, text: str) -> None:
-		"""Send text to TTS by pushing TextFrame into the pipeline."""
+		"""Send text to TTS by pushing TextFrame into pipeline."""
 		if not text or not text.strip():
 			logger.debug('AgentToTTSProcessor.send_text: Empty text, skipping')
 			return
@@ -342,7 +342,7 @@ class AgentToTTSProcessor(FrameProcessor):
 			raise  # Re-raise to see the full error
 
 	async def process_frame(self, frame, direction: FrameDirection) -> None:
-		"""Process frames - pass everything through."""
+		"""Process frames and pass everything through."""
 		if isinstance(frame, StartFrame):
 			await super().process_frame(frame, direction)
 			await self.push_frame(frame, direction)
@@ -353,7 +353,7 @@ class AgentToTTSProcessor(FrameProcessor):
 
 
 class VoicePipeline:
-	"""Manages the Pipecat voice pipeline for STT and TTS."""
+	"""Manages Pipecat voice pipeline for STT and TTS."""
 
 	def __init__(
 		self,
@@ -383,7 +383,7 @@ class VoicePipeline:
 		self._audio_stream_processor: Optional[AudioStreamProcessor] = None
 
 	async def initialize(self) -> bool:
-		"""Initialize the pipeline components."""
+		"""Initialize pipeline components."""
 		try:
 			logger.debug(
 				'Creating LocalAudioTransport with VAD (%.1fs pause threshold)...',
@@ -524,7 +524,7 @@ class VoicePipeline:
 			return False
 
 	async def run(self) -> None:
-		"""Run the pipeline (blocks until cancelled)."""
+		"""Run pipeline until cancelled."""
 		if not self.pipeline or not self.task or not self.runner:
 			raise RuntimeError('Pipeline not initialized. Call initialize() first.')
 
@@ -540,12 +540,12 @@ class VoicePipeline:
 			raise
 
 	def set_websocket_sender(self, sender) -> None:
-		"""Set the WebSocket sender for audio streaming."""
+		"""Set WebSocket sender for audio streaming."""
 		if self._audio_stream_processor:
 			self._audio_stream_processor.set_websocket_sender(sender)
 
 	async def stop(self) -> None:
-		"""Stop the pipeline completely - stops listening and cleans up all resources."""
+		"""Stop pipeline and clean up resources."""
 		logger.info('Stopping voice pipeline completely...')
 		
 		# Cancel the runner task if it exists

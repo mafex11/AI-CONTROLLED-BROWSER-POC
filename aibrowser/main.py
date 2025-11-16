@@ -25,35 +25,35 @@ def setup_logging() -> None:
 
 
 async def interactive_loop(integration: BrowserUseIntegration) -> None:
-	print('\n' + '=' * 60)
-	print('AI Browser Interactive Mode')
-	print('=' * 60)
-	print("Type a browser task, or 'exit' to stop.")
-	print('=' * 60 + '\n')
+	LOGGER.info('\n' + '=' * 60)
+	LOGGER.info('AI Browser Interactive Mode')
+	LOGGER.info('=' * 60)
+	LOGGER.info("Type a browser task, or 'exit' to stop.")
+	LOGGER.info('=' * 60 + '\n')
 
 	while True:
 		try:
 			command = input('You: ').strip()
 		except (EOFError, KeyboardInterrupt):
-			print('\nExiting...')
+			LOGGER.info('\nExiting...')
 			break
 
 		if not command:
 			continue
 		if command.lower() in {'exit', 'quit', 'q'}:
-			print('Exiting...')
+			LOGGER.info('Exiting...')
 			break
 
-		print('Processing...')
+		LOGGER.info('Processing...')
 		try:
 			result = await integration.run(command)
 			message = result.get('message', '')
 			if message:
-				print(f'Agent: {message}\n')
+				LOGGER.info(f'Agent: {message}\n')
 			else:
-				print('Agent: (no message)\n')
+				LOGGER.info('Agent: (no message)\n')
 		except Exception as e:
-			print(f'Error: {e}\n')
+			LOGGER.error(f'Error: {e}\n')
 			LOGGER.exception('Error processing command')
 
 
@@ -71,7 +71,7 @@ async def main() -> None:
 	try:
 		started = await manager.start()
 		if not started or manager.endpoint is None:
-			print('Failed to start Chromium. Ensure Chrome is installed or Playwright is available.')
+			LOGGER.error('Failed to start Chromium. Ensure Chrome is installed or Playwright is available.')
 			sys.exit(1)
 
 		version_url = f'{manager.endpoint}/json/version'
@@ -80,33 +80,33 @@ async def main() -> None:
 			async with aiohttp.ClientSession() as session:
 				async with session.get(version_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
 					if resp.status != 200:
-						print(f'CDP endpoint returned status {resp.status}. Chrome may not be ready.')
+						LOGGER.error(f'CDP endpoint returned status {resp.status}. Chrome may not be ready.')
 						sys.exit(1)
 					data = await resp.json()
 					ws_url = data.get('webSocketDebuggerUrl')
 					if not ws_url:
-						print('CDP endpoint did not provide WebSocket URL.')
+						LOGGER.error('CDP endpoint did not provide WebSocket URL.')
 						sys.exit(1)
-					print(f'CDP endpoint ready: {manager.endpoint}')
-					print(f'WebSocket URL: {ws_url}')
+					LOGGER.info(f'CDP endpoint ready: {manager.endpoint}')
+					LOGGER.info(f'WebSocket URL: {ws_url}')
 		except Exception as e:
-			print(f'Failed to verify CDP endpoint: {e}')
+			LOGGER.error(f'Failed to verify CDP endpoint: {e}')
 			sys.exit(1)
 
 		def step_callback(step: int, reasoning: str, narration: str, tool: str, phase: str) -> None:
 			if phase == 'before':
-				print(f'\n{"="*60}')
-				print(f'Step {step}')
-				print(f'{"="*60}')
-				print(f'1) Reasoning (based on browser screen):')
-				print(f'   {reasoning}')
-				print(f'\n2) Agent narration:')
-				print(f'   {narration}')
-				print(f'\n3) Tool executed:')
-				print(f'   {tool}')
+				LOGGER.info(f'\n{"="*60}')
+				LOGGER.info(f'Step {step}')
+				LOGGER.info(f'{"="*60}')
+				LOGGER.info(f'1) Reasoning (based on browser screen):')
+				LOGGER.info(f'   {reasoning}')
+				LOGGER.info(f'\n2) Agent narration:')
+				LOGGER.info(f'   {narration}')
+				LOGGER.info(f'\n3) Tool executed:')
+				LOGGER.info(f'   {tool}')
 			elif phase == 'after':
-				print(f'\n   Result: {tool}')
-				print(f'{"="*60}')
+				LOGGER.info(f'\n   Result: {tool}')
+				LOGGER.info(f'{"="*60}')
 		
 		integration = BrowserUseIntegration(
 			cdp_url=ws_url,
@@ -114,7 +114,7 @@ async def main() -> None:
 			step_callback=step_callback,
 		)
 		if not await integration.initialize():
-			print('Failed to initialize browser-use integration.')
+			LOGGER.error('Failed to initialize browser-use integration.')
 			sys.exit(1)
 
 		await interactive_loop(integration)
@@ -126,5 +126,5 @@ if __name__ == '__main__':
 	try:
 		asyncio.run(main())
 	except KeyboardInterrupt:
-		print('\nInterrupted.')
+		LOGGER.info('\nInterrupted.')
 

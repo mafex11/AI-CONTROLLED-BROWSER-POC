@@ -26,7 +26,7 @@ _CALLBACK_SENTINEL = object()
 
 
 def _quiet_browser_use_logs() -> None:
-	"""Suppress noisy browser-use logs, including EventBus capacity errors."""
+	"""Suppress noisy browser-use logs."""
 	for name, level in {
 		'httpx': logging.WARNING,
 		'cdp_use': logging.WARNING,
@@ -41,7 +41,7 @@ def _quiet_browser_use_logs() -> None:
 		logging.getLogger(name).setLevel(level)
 	
 	class EventBusCapacityFilter(logging.Filter):
-		"""Filter out EventBus capacity errors from AboutBlankWatchdog."""
+		"""Filter out EventBus capacity errors."""
 		def filter(self, record: logging.LogRecord) -> bool:
 			if 'EventBus at capacity' in record.getMessage():
 				return False
@@ -62,7 +62,7 @@ class _State:
 
 
 class BrowserUseIntegration:
-	"""Owns the BrowserSession and exposes a simple run(command) interface."""
+	"""Owns BrowserSession and exposes run(command) interface."""
 
 	def __init__(
 		self,

@@ -40,7 +40,7 @@ class AgentRunResult:
 
 
 class DirectBrowserAgent:
-	"""Gemini-driven loop that chooses browser-use actions based on structured prompts."""
+	"""Agent that chooses browser-use actions based on structured prompts."""
 
 	def __init__(
 		self,
@@ -70,7 +70,7 @@ class DirectBrowserAgent:
 		self._last_highlight_screenshot_base64: str | None = None  # Store last highlight screenshot for step callback
 
 	def _check_step_timeout(self, step: int, step_start_time: float) -> bool:
-		"""Check if step has exceeded timeout. Returns True if timeout exceeded."""
+		"""Check if step has exceeded timeout."""
 		step_elapsed = time.time() - step_start_time
 		if step_elapsed > self.config.step_timeout:
 			logger.warning(
@@ -605,7 +605,7 @@ class DirectBrowserAgent:
 		)
 
 	def _is_element_error(self, result_str: str) -> bool:
-		"""Check if the error indicates an element changed or is not found."""
+		"""Check if error indicates element changed or not found."""
 		if not result_str:
 			return False
 		
@@ -770,9 +770,7 @@ class DirectBrowserAgent:
 			return f'Action {action_type} failed: {error}'
 
 	async def _preview_and_capture_highlight(self, action_type: str, payload: Dict[str, Any], step: int) -> str | None:
-		"""Show highlight indicator, wait for it to appear, take screenshot, then action will execute.
-		Returns base64 encoded screenshot data for use in step callback.
-		Always captures screenshot for frontend use, even if not saving to disk."""
+		"""Show highlight indicator and capture screenshot before action execution."""
 		
 		try:
 			node = None
@@ -879,7 +877,7 @@ class DirectBrowserAgent:
 		return self.answer_builder.build(narration=narration, action=action, result=result)
 
 	def _extract_page_info(self, state) -> str:
-		"""Extract detailed page information from browser state for reasoning."""
+		"""Extract page information from browser state for reasoning."""
 		if state is None:
 			return 'No page state available'
 		
@@ -942,7 +940,7 @@ class DirectBrowserAgent:
 		return ' | '.join(info_parts)
 
 	def _extract_reasoning_from_state(self, tab_summary: str, structured: StructuredAgentResponse, state=None) -> str:
-		"""Extract reasoning based on browser state and agent thinking."""
+		"""Extract reasoning from browser state and agent thinking."""
 		reasoning_parts = []
 		
 		if structured.thinking:
@@ -977,13 +975,13 @@ class DirectBrowserAgent:
 		return 'Analyzing current browser state and planning next action...'
 
 	def clear_conversation(self) -> None:
-		"""Clear conversation history to start a new session."""
+		"""Clear conversation history."""
 		logger.info('Clearing conversation history for new session')
 		self._conversation.clear()
 		self._context_log.clear()
 
 	def get_conversation_summary(self) -> str:
-		"""Get a summary of the conversation history."""
+		"""Get summary of conversation history."""
 		if not self._conversation:
 			return 'No conversation history'
 		summary_parts = []
@@ -997,7 +995,7 @@ class DirectBrowserAgent:
 		return '\n'.join(summary_parts)
 
 	def _format_tool_info(self, action_type: str, payload: Dict[str, Any]) -> str:
-		"""Format tool execution information in a readable way."""
+		"""Format tool execution information."""
 		if action_type == 'search':
 			query = payload.get('query', '')
 			engine = payload.get('engine', 'google')

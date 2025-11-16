@@ -14,7 +14,7 @@ from browser_use.tools.service import Tools
 
 @dataclass
 class BrowserController:
-	"""Expose high-level helpers for executing browser-use actions."""
+	"""High-level helpers for executing browser-use actions."""
 
 	browser_session: BrowserSession
 	tools: Tools

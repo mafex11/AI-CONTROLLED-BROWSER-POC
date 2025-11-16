@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class CDPBrowserManager:
-	"""Launch or connect to a Chromium instance with CDP enabled."""
+	"""Launch or connect to Chromium instance with CDP enabled."""
 
 	def __init__(self, *, port: int = 9222, headless: bool = False) -> None:
 		self.port = port
@@ -104,7 +104,7 @@ class CDPBrowserManager:
 		return True
 
 	async def _start_with_playwright(self) -> bool:
-		"""Launch Playwright's bundled Chromium (downloaded via CDN)."""
+		"""Launch Playwright's bundled Chromium."""
 		try:
 			from playwright.async_api import async_playwright
 

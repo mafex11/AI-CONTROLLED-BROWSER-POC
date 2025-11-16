@@ -67,8 +67,7 @@ class QueryRequest(BaseModel):
 
 
 async def get_screenshot_base64(integration: BrowserUseIntegration) -> Optional[str]:
-    """Get screenshot from browser integration as base64 string.
-    If a highlight screenshot is available (from _preview_and_capture_highlight), use that instead."""
+    """Get screenshot from browser integration as base64 string."""
     if not integration or not integration._state:
         return None
     
@@ -103,7 +102,7 @@ async def get_screenshot_base64(integration: BrowserUseIntegration) -> Optional[
 
 
 async def ensure_browser_initialized() -> bool:
-    """Lazy initialization: start browser only when first query is made."""
+    """Start browser only when first query is made."""
     global _browser_manager, _text_integration, _last_activity_time
     
     if _browser_manager and await _browser_manager.is_running():
@@ -144,7 +143,7 @@ async def ensure_browser_initialized() -> bool:
 
 
 async def cleanup_browser_if_idle() -> None:
-    """Background task to cleanup browser after idle timeout."""
+    """Cleanup browser after idle timeout."""
     global _browser_manager, _text_integration, _last_activity_time
     
     while True:
@@ -610,7 +609,7 @@ async def websocket_voice(websocket: WebSocket):
 
 @app.post("/api/cleanup")
 async def cleanup_endpoint():
-    """Explicit cleanup endpoint called when frontend tab closes."""
+    """Cleanup endpoint called when frontend tab closes."""
     global _active_connections, _last_activity_time
     
     logger.info("Cleanup endpoint called - clearing active connections")
