@@ -6,7 +6,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from pipecat.frames.frames import TextFrame, StartFrame, TranscriptionFrame, InterimTranscriptionFrame, BotStartedSpeakingFrame, BotStoppedSpeakingFrame, TTSAudioRawFrame
+from pipecat.frames.frames import TextFrame, StartFrame, TranscriptionFrame, InterimTranscriptionFrame, BotStartedSpeakingFrame, BotStoppedSpeakingFrame, TTSAudioRawFrame, UserStartedSpeakingFrame, InterruptionFrame
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -275,6 +275,20 @@ class AudioStreamProcessor(FrameProcessor):
 		"""Process frames and stream TTS audio to frontend."""
 		await super().process_frame(frame, direction)
 		
+		# Handle interruptions - notify frontend to stop audio
+		if isinstance(frame, (UserStartedSpeakingFrame, InterruptionFrame)) and self._websocket_sender:
+			try:
+				if asyncio.iscoroutinefunction(self._websocket_sender):
+					await self._websocket_sender({
+						"type": "interruption",
+					})
+				else:
+					self._websocket_sender({
+						"type": "interruption",
+					})
+			except Exception as e:
+				logger.warning('Error sending interruption signal: %s', e)
+		
 		# Intercept TTS audio frames and stream to frontend
 		if isinstance(frame, TTSAudioRawFrame) and self._websocket_sender:
 			try:
@@ -381,7 +395,7 @@ class VoicePipeline:
 				
 				transport_params = LocalAudioTransportParams(
 					audio_in_enabled=True,
-					audio_out_enabled=False,  # Disable local audio output - stream to frontend instead
+					audio_out_enabled=True,  # Enable local audio output for voice mode
 					vad_analyzer=vad_analyzer,
 				)
 				transport = LocalAudioTransport(transport_params)
@@ -483,9 +497,9 @@ class VoicePipeline:
 					text_to_agent,
 					self._agent_to_tts,
 					tts_service,
-					self._audio_stream_processor,  # Stream audio to frontend
+					self._audio_stream_processor,  # Stream audio to frontend (optional)
 					self._speech_tracker,
-					transport.output(),  # Keep local output disabled or remove it
+					transport.output(),  # Local audio output for voice mode
 				]
 			)
 			
@@ -531,19 +545,34 @@ class VoicePipeline:
 			self._audio_stream_processor.set_websocket_sender(sender)
 
 	async def stop(self) -> None:
-		"""Stop the pipeline."""
-		logger.debug('Stopping voice pipeline...')
+		"""Stop the pipeline completely - stops listening and cleans up all resources."""
+		logger.info('Stopping voice pipeline completely...')
 		
+		# Cancel the runner task if it exists
+		if self.runner:
+			try:
+				await self.runner.cancel()
+				logger.debug('Pipeline runner cancelled')
+			except Exception as e:
+				logger.warning('Error cancelling runner: %s', e)
+		
+		# Cancel the pipeline task
 		if self.task:
 			try:
 				await self.task.cancel()
+				logger.debug('Pipeline task cancelled')
 			except Exception as e:
 				logger.warning('Error cancelling task: %s', e)
 		
+		# Clean up transport (this stops audio input)
 		if self._transport:
 			try:
+				# Send EndFrame to stop the transport
+				from pipecat.frames.frames import EndFrame
+				await self._transport.stop(EndFrame())
 				await self._transport.cleanup()
+				logger.debug('Transport cleaned up - audio input stopped')
 			except Exception as e:
 				logger.warning('Error cleaning up transport: %s', e)
 		
-		logger.debug('Voice pipeline stopped')
+		logger.info('Voice pipeline stopped completely - no longer listening')

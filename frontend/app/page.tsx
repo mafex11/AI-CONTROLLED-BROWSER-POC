@@ -44,6 +44,10 @@ export default function Home() {
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const isPlayingAudioRef = useRef(false);
+  const activeAudioSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const audioQueueRef = useRef<Array<{ audioBase64: string; sampleRate: number; numChannels: number }>>([]);
+  const isProcessingAudioQueueRef = useRef(false);
+  const nextPlayTimeRef = useRef<number | null>(null);
 
   // Initialize AudioContext for voice mode
   useEffect(() => {
@@ -60,62 +64,144 @@ export default function Home() {
     };
   }, [isVoiceMode]);
 
-  // Play audio chunks as they arrive
+  // Stop all currently playing audio
+  const stopAllAudio = useCallback(() => {
+    activeAudioSourcesRef.current.forEach((source) => {
+      try {
+        source.stop();
+      } catch (e) {
+        // Source may already be stopped
+      }
+    });
+    activeAudioSourcesRef.current = [];
+    isPlayingAudioRef.current = false;
+    // Clear audio queue
+    audioQueueRef.current = [];
+    isProcessingAudioQueueRef.current = false;
+    nextPlayTimeRef.current = null;
+  }, []);
+
+  // Process audio queue sequentially with back-to-back playback
+  const processAudioQueue = useCallback(async () => {
+    if (isProcessingAudioQueueRef.current || !audioContextRef.current) {
+      return;
+    }
+
+    isProcessingAudioQueueRef.current = true;
+
+    // Resume AudioContext if suspended (required for user interaction)
+    if (audioContextRef.current.state === 'suspended') {
+      await audioContextRef.current.resume();
+    }
+
+    // Get start time - either now or continue from where we left off
+    let currentTime = nextPlayTimeRef.current ?? audioContextRef.current.currentTime;
+    if (currentTime < audioContextRef.current.currentTime) {
+      currentTime = audioContextRef.current.currentTime;
+    }
+
+    while (audioQueueRef.current.length > 0) {
+      const chunk = audioQueueRef.current.shift();
+      if (!chunk) break;
+
+      try {
+        // Decode base64 to binary string, then to Uint8Array
+        const binaryString = atob(chunk.audioBase64);
+        const audioData = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          audioData[i] = binaryString.charCodeAt(i);
+        }
+
+        // Create AudioBuffer from PCM data
+        // PCM16 = 2 bytes per sample, so total samples = bytes / 2
+        const samplesPerChannel = audioData.length / (2 * chunk.numChannels);
+        const audioBuffer = audioContextRef.current.createBuffer(
+          chunk.numChannels,
+          samplesPerChannel,
+          chunk.sampleRate
+        );
+        
+        // Convert PCM16 bytes to Float32 samples
+        const dataView = new DataView(audioData.buffer);
+        for (let channel = 0; channel < chunk.numChannels; channel++) {
+          const channelData = audioBuffer.getChannelData(channel);
+          for (let i = 0; i < samplesPerChannel; i++) {
+            // Interleaved PCM: sample format is [L, R, L, R, ...] for stereo
+            const byteIndex = (i * chunk.numChannels + channel) * 2;
+            const int16 = dataView.getInt16(byteIndex, true); // little-endian
+            channelData[i] = int16 / 32768.0; // Convert to [-1, 1] range
+          }
+        }
+
+        // Calculate duration of this chunk
+        const duration = audioBuffer.duration;
+
+        // Create AudioBufferSourceNode and schedule to play back-to-back
+        const source = audioContextRef.current.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContextRef.current.destination);
+        
+        // Track this source so we can stop it on interruption
+        activeAudioSourcesRef.current.push(source);
+        
+        // Schedule playback at currentTime (back-to-back with previous chunk)
+        source.start(currentTime);
+        
+        // Update currentTime for next chunk (play immediately after this one)
+        currentTime += duration;
+        nextPlayTimeRef.current = currentTime;
+
+        // Clean up when done
+        source.onended = () => {
+          // Remove from active sources when done
+          activeAudioSourcesRef.current = activeAudioSourcesRef.current.filter(s => s !== source);
+          if (activeAudioSourcesRef.current.length === 0) {
+            isPlayingAudioRef.current = false;
+            // Reset next play time when all audio is done
+            if (audioQueueRef.current.length === 0) {
+              nextPlayTimeRef.current = null;
+            }
+          }
+        };
+
+        isPlayingAudioRef.current = true;
+      } catch (error) {
+        console.error('Error playing audio chunk:', error);
+      }
+    }
+
+    isProcessingAudioQueueRef.current = false;
+    
+    // If there are still chunks in queue, process them (use setTimeout to avoid recursion)
+    if (audioQueueRef.current.length > 0) {
+      setTimeout(() => {
+        if (!isProcessingAudioQueueRef.current) {
+          processAudioQueue();
+        }
+      }, 0);
+    }
+  }, []);
+
+  // Queue audio chunks for sequential playback
   const playAudioChunk = useCallback(async (audioBase64: string, sampleRate: number, numChannels: number) => {
     if (!audioContextRef.current) {
       return;
     }
 
-    try {
-      // Decode base64 to binary string, then to Uint8Array
-      const binaryString = atob(audioBase64);
-      const audioData = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        audioData[i] = binaryString.charCodeAt(i);
-      }
-      
-      // Resume AudioContext if suspended (required for user interaction)
-      if (audioContextRef.current.state === 'suspended') {
-        await audioContextRef.current.resume();
-      }
-
-      // Create AudioBuffer from PCM data
-      // PCM16 = 2 bytes per sample, so total samples = bytes / 2
-      const samplesPerChannel = audioData.length / (2 * numChannels);
-      const audioBuffer = audioContextRef.current.createBuffer(numChannels, samplesPerChannel, sampleRate);
-      
-      // Convert PCM16 bytes to Float32 samples
-      const dataView = new DataView(audioData.buffer);
-      for (let channel = 0; channel < numChannels; channel++) {
-        const channelData = audioBuffer.getChannelData(channel);
-        for (let i = 0; i < samplesPerChannel; i++) {
-          // Interleaved PCM: sample format is [L, R, L, R, ...] for stereo
-          const byteIndex = (i * numChannels + channel) * 2;
-          const int16 = dataView.getInt16(byteIndex, true); // little-endian
-          channelData[i] = int16 / 32768.0; // Convert to [-1, 1] range
-        }
-      }
-
-      // Create AudioBufferSourceNode and play
-      const source = audioContextRef.current.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(audioContextRef.current.destination);
-      
-      source.onended = () => {
-        isPlayingAudioRef.current = false;
-      };
-
-      isPlayingAudioRef.current = true;
-      source.start();
-    } catch (error) {
-      console.error('Error playing audio chunk:', error);
-    }
-  }, []);
+    // Add to queue
+    audioQueueRef.current.push({ audioBase64, sampleRate, numChannels });
+    
+    // Start processing queue if not already processing
+    processAudioQueue();
+  }, [processAudioQueue]);
 
   const { isConnected: isVoiceConnected, isConnecting: isVoiceConnecting, disconnect: disconnectVoice } = useVoiceWebSocket({
     isEnabled: isVoiceMode,
     onUserSpeech: (text) => {
       if (!text.trim()) return;
+      
+      // Stop all audio when user starts speaking (interruption)
+      stopAllAudio();
       
       setVoiceStatus(`You: ${text}`);
       
@@ -245,53 +331,58 @@ export default function Home() {
       // Always add agent response to chat if there's narration
       // This ensures all responses from voice mode are displayed
       if (stepData.narration && stepData.narration.trim()) {
-        const stepKey = `${stepData.step}-${stepData.narration}-${Date.now()}`;
+        // Use a stable unique key for this step/narration combo
+        const uniqueKey = `step-${stepData.step}-narration`;
         
+        setChatMessages((msgPrev) => {
+          // Remove thinking message if it exists
+          const filtered = msgPrev.filter((msg) => !(msg.isLoading && msg.type === "agent"));
+          
+          // Check if we already have a message for this step
+          // Use a more reliable check: look for messages with the step number in the ID
+          const existingMessageIndex = filtered.findIndex(
+            (msg) => msg.type === "agent" && msg.id.includes(`-${stepData.step}-`)
+          );
+          
+          if (existingMessageIndex >= 0) {
+            // Update existing message with new content and screenshot
+            const updated = [...filtered];
+            const existingMsg = updated[existingMessageIndex];
+            
+            // Only update if content changed or screenshot is new
+            if (existingMsg.content !== stepData.narration || 
+                (stepData.screenshot && existingMsg.screenshot !== stepData.screenshot)) {
+              updated[existingMessageIndex] = {
+                ...existingMsg,
+                content: stepData.narration,
+                screenshot: stepData.screenshot || existingMsg.screenshot,
+                timestamp: new Date(),
+              };
+            }
+            
+            return updated;
+          }
+          
+          // Add new message only if we don't have one for this step
+          return [
+            ...filtered,
+            {
+              id: `agent-step-${stepData.step}-${Date.now()}`,
+              type: "agent",
+              content: stepData.narration,
+              screenshot: stepData.screenshot,
+              timestamp: new Date(),
+            },
+          ];
+        });
+        
+        // Track processed steps separately to prevent duplicate processing
         setProcessedSteps((prev) => {
-          // Use a more unique key to allow same step with different narrations
-          const uniqueKey = `${stepData.step}-${stepData.narration}`;
           if (prev.has(uniqueKey)) {
-            return prev; // Already processed this exact step/narration combo
+            return prev; // Already processed this step
           }
           const newSet = new Set(prev);
           newSet.add(uniqueKey);
-          
-          // Add message to chat when we add to processed steps
-          setChatMessages((msgPrev) => {
-            // Remove thinking message if it exists
-            const filtered = msgPrev.filter((msg) => !(msg.isLoading && msg.type === "agent"));
-            
-            // Check if we already have this exact message (same content)
-            // Allow same narration but with different timestamps to handle updates
-            const messageExists = filtered.some(
-              (msg) => msg.type === "agent" && 
-                       msg.content === stepData.narration && 
-                       msg.id.startsWith(`agent-${stepData.step}-`)
-            );
-            
-            if (messageExists) {
-              // Update existing message with new screenshot if available
-              return filtered.map(msg => 
-                msg.type === "agent" && 
-                msg.content === stepData.narration && 
-                msg.id.startsWith(`agent-${stepData.step}-`)
-                  ? { ...msg, screenshot: stepData.screenshot || msg.screenshot }
-                  : msg
-              );
-            }
-            
-            return [
-              ...filtered,
-              {
-                id: `agent-${stepData.step}-${Date.now()}`,
-                type: "agent",
-                content: stepData.narration,
-                screenshot: stepData.screenshot,
-                timestamp: new Date(),
-              },
-            ];
-          });
-          
           return newSet;
         });
       }
@@ -302,6 +393,10 @@ export default function Home() {
     onAudioChunk: (audioBase64, sampleRate, numChannels) => {
       // Play audio chunk as it arrives
       playAudioChunk(audioBase64, sampleRate, numChannels);
+    },
+    onInterruption: () => {
+      // Stop all audio when user interrupts
+      stopAllAudio();
     },
   });
 
@@ -366,6 +461,33 @@ export default function Home() {
       });
     };
   }, []);
+
+  const handleStopVoiceMode = () => {
+    // Stop all audio
+    stopAllAudio();
+    
+    // Disconnect voice WebSocket
+    if (disconnectVoice) {
+      disconnectVoice();
+    }
+    
+    // Turn off voice mode
+    setIsVoiceMode(false);
+    
+    // Remove thinking message and add "stopped by user" message
+    setChatMessages((prev) => {
+      const filtered = prev.filter((msg) => !(msg.isLoading && msg.type === "agent"));
+      return [
+        ...filtered,
+        {
+          id: `agent-stopped-${Date.now()}`,
+          type: "agent",
+          content: "Voice mode stopped by user",
+          timestamp: new Date(),
+        },
+      ];
+    });
+  };
 
   const handleStop = () => {
     if (isVoiceMode) {
@@ -706,17 +828,30 @@ export default function Home() {
                         />
                       </div>
 
-                      {/* Voice Mode Button */}
-                      <Button
-                        type="button"
-                        variant={isVoiceMode ? "default" : "outline"}
-                        size="icon"
-                        onClick={() => setIsVoiceMode(!isVoiceMode)}
-                        disabled={isLoading}
-                        className="h-12 w-12 shrink-0 rounded-full"
-                      >
-                        <Mic className={`h-5 w-5 ${isVoiceMode ? 'animate-pulse' : ''}`} />
-                      </Button>
+                      {/* Voice Mode Button / Stop Button */}
+                      {isVoiceMode ? (
+                        <Button
+                          type="button"
+                          variant="destructive"
+                          size="icon"
+                          onClick={handleStopVoiceMode}
+                          disabled={isLoading}
+                          className="h-12 w-12 shrink-0 rounded-full"
+                        >
+                          <Square className="h-5 w-5" />
+                        </Button>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          onClick={() => setIsVoiceMode(true)}
+                          disabled={isLoading}
+                          className="h-12 w-12 shrink-0 rounded-full"
+                        >
+                          <Mic className="h-5 w-5" />
+                        </Button>
+                      )}
 
                       {/* Submit/Stop Button */}
                       {shouldShowStop ? (
@@ -1010,17 +1145,30 @@ export default function Home() {
                       />
                     </div>
 
-                    {/* Voice Mode Button */}
-                    <Button
-                      type="button"
-                      variant={isVoiceMode ? "default" : "outline"}
-                      size="icon"
-                      onClick={() => setIsVoiceMode(!isVoiceMode)}
-                      disabled={isLoading}
-                      className="h-12 w-12 shrink-0 rounded-full"
-                    >
-                      <Mic className={`h-5 w-5 ${isVoiceMode ? 'animate-pulse' : ''}`} />
-                    </Button>
+                    {/* Voice Mode Button / Stop Button */}
+                    {isVoiceMode ? (
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="icon"
+                        onClick={handleStopVoiceMode}
+                        disabled={isLoading}
+                        className="h-12 w-12 shrink-0 rounded-full"
+                      >
+                        <Square className="h-5 w-5" />
+                      </Button>
+                    ) : (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        onClick={() => setIsVoiceMode(true)}
+                        disabled={isLoading}
+                        className="h-12 w-12 shrink-0 rounded-full"
+                      >
+                        <Mic className="h-5 w-5" />
+                      </Button>
+                    )}
 
                     {/* Submit/Stop Button */}
                     {shouldShowStop ? (

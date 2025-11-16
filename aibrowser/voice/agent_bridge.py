@@ -32,6 +32,9 @@ class AgentBridge:
 		self._tts_processor = None
 		self._speech_tracker = None
 		self._awaiting_user_input = False
+		self._tts_queue: asyncio.Queue = asyncio.Queue()
+		self._tts_processing = False
+		self._tts_task: Optional[asyncio.Task] = None
 
 	async def process_user_text(self, text: str) -> None:
 		"""Process user speech transcript and run agent."""
@@ -201,14 +204,10 @@ class AgentBridge:
 						if not (message.startswith('{') or message.startswith('[') or 'index=' in message.lower()):
 							logger.debug(f'Step {step} (before): {message}')
 							_last_tts_message = message
-							await self._send_to_tts(message)
-							if self._speech_tracker:
-								try:
-									logger.debug(f'Waiting for speech to complete before executing action...')
-									await self._speech_tracker.wait_for_speech_completion(timeout=30.0)
-									logger.debug(f'Speech completed, action can now execute')
-								except Exception as e:
-									logger.warning(f'Error waiting for speech completion: {e}')
+							# Send TTS async - don't wait for it to complete
+							# Audio is streamed to frontend, so we can't track local completion
+							# Execute action immediately instead of waiting
+							asyncio.create_task(self._send_to_tts(message))
 					
 					return
 				elif phase == 'after':
@@ -249,17 +248,12 @@ class AgentBridge:
 								_last_tts_message = message
 								logger.debug(f'About to send TTS message: "{message}"')
 								try:
-									await self._send_to_tts(message)
-									logger.debug(f'TTS message sent successfully, waiting for speech...')
+									# Send TTS async - don't wait for it to complete
+									# Audio is streamed to frontend, so we can't track local completion
+									asyncio.create_task(self._send_to_tts(message))
+									logger.debug(f'TTS message sent successfully')
 								except Exception as e:
 									logger.error(f'Error sending TTS message: {e}', exc_info=True)
-								if self._speech_tracker:
-									try:
-										logger.debug(f'Waiting for speech to complete after task completion...')
-										await self._speech_tracker.wait_for_speech_completion(timeout=30.0)
-										logger.debug(f'Speech completed after task completion')
-									except Exception as e:
-										logger.warning(f'Error waiting for speech completion: {e}')
 							else:
 								logger.debug(f'Message filtered out due to JSON/technical content: "{message}"')
 						else:
@@ -331,6 +325,7 @@ class AgentBridge:
 		self._speech_tracker = tracker
 
 	async def _send_to_tts(self, text: str) -> None:
+		"""Queue text for TTS processing to ensure sequential playback."""
 		if not text or not text.strip():
 			logger.debug('_send_to_tts: Empty text, skipping')
 			return
@@ -339,17 +334,52 @@ class AgentBridge:
 			logger.warning('_send_to_tts: No TTS processor set')
 			return
 		
-		logger.debug(f'_send_to_tts: Sending text to TTS processor: "{text[:100]}{"..." if len(text) > 100 else ""}"')
+		logger.debug(f'_send_to_tts: Queuing text for TTS: "{text[:100]}{"..." if len(text) > 100 else ""}"')
 		
+		# Queue the text for sequential processing
+		await self._tts_queue.put(text.strip())
+		
+		# Start TTS processing task if not already running
+		if not self._tts_processing:
+			self._tts_processing = True
+			if self._tts_task and not self._tts_task.done():
+				self._tts_task.cancel()
+			self._tts_task = asyncio.create_task(self._process_tts_queue())
+	
+	async def _process_tts_queue(self) -> None:
+		"""Process TTS queue sequentially to prevent overlapping audio."""
 		try:
-			if hasattr(self._tts_processor, 'send_text'):
-				await self._tts_processor.send_text(text.strip())
-			else:
-				from pipecat.frames.frames import TextFrame
-				await self._tts_processor.push_frame(TextFrame(text=text.strip()), FrameDirection.DOWNSTREAM)
-		except Exception as e:
-			logger.error('Error sending text to TTS: %s', e, exc_info=True)
+			while True:
+				try:
+					# Get next text from queue (with timeout to allow cancellation)
+					text = await asyncio.wait_for(self._tts_queue.get(), timeout=1.0)
+					
+					logger.debug(f'_process_tts_queue: Processing TTS: "{text[:100]}{"..." if len(text) > 100 else ""}"')
+					
+					try:
+						if hasattr(self._tts_processor, 'send_text'):
+							await self._tts_processor.send_text(text)
+						else:
+							from pipecat.frames.frames import TextFrame
+							await self._tts_processor.push_frame(TextFrame(text=text), FrameDirection.DOWNSTREAM)
+						
+						logger.debug(f'_process_tts_queue: TTS sent successfully')
+					except Exception as e:
+						logger.error('Error sending text to TTS: %s', e, exc_info=True)
+					
+					# Mark task as done
+					self._tts_queue.task_done()
+					
+				except asyncio.TimeoutError:
+					# Check if queue is empty and we should stop
+					if self._tts_queue.empty():
+						break
+					continue
+		except asyncio.CancelledError:
+			logger.debug('TTS queue processing cancelled')
 			raise
+		finally:
+			self._tts_processing = False
 
 	def is_processing(self) -> bool:
 		return self._processing

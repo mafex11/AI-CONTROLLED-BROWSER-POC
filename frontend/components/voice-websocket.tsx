@@ -17,10 +17,11 @@ interface VoiceWebSocketProps {
   onStep?: (stepData: StepData) => void;
   onError?: (error: string) => void;
   onAudioChunk?: (audio: string, sampleRate: number, numChannels: number) => void;
+  onInterruption?: () => void;
 }
 
 export function useVoiceWebSocket(props: VoiceWebSocketProps) {
-  const { isEnabled, onUserSpeech, onAgentResponse, onStep, onError, onAudioChunk } = props;
+  const { isEnabled, onUserSpeech, onAgentResponse, onStep, onError, onAudioChunk, onInterruption } = props;
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [reconnectTrigger, setReconnectTrigger] = useState(0);
@@ -30,10 +31,10 @@ export function useVoiceWebSocket(props: VoiceWebSocketProps) {
   const intentionallyDisconnectedRef = useRef(false);
   
   // Store callbacks in refs to avoid dependency issues
-  const callbacksRef = useRef({ onUserSpeech, onAgentResponse, onStep, onError, onAudioChunk });
+  const callbacksRef = useRef({ onUserSpeech, onAgentResponse, onStep, onError, onAudioChunk, onInterruption });
   useEffect(() => {
-    callbacksRef.current = { onUserSpeech, onAgentResponse, onStep, onError, onAudioChunk };
-  }, [onUserSpeech, onAgentResponse, onStep, onError, onAudioChunk]);
+    callbacksRef.current = { onUserSpeech, onAgentResponse, onStep, onError, onAudioChunk, onInterruption };
+  }, [onUserSpeech, onAgentResponse, onStep, onError, onAudioChunk, onInterruption]);
 
   useEffect(() => {
     if (!isEnabled) {
@@ -109,6 +110,8 @@ export function useVoiceWebSocket(props: VoiceWebSocketProps) {
             callbacks.onError(data.error);
           } else if (data.type === "audio_chunk" && callbacks.onAudioChunk) {
             callbacks.onAudioChunk(data.audio, data.sample_rate, data.num_channels);
+          } else if (data.type === "interruption" && callbacks.onInterruption) {
+            callbacks.onInterruption();
           }
         } catch (e) {
           console.error("Failed to parse WebSocket message:", e);
