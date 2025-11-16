@@ -48,7 +48,6 @@ class Config:
 	GEMINI_API_KEY: str = os.getenv('GEMINI_API_KEY', '')
 	GEMINI_MODEL: str = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
 
-	# Robust parsing with sane defaults so misconfigured env vars do not crash startup.
 	_GEMINI_TEMPERATURE, _ = _parse_float('GEMINI_TEMPERATURE', 0.3)
 	GEMINI_TEMPERATURE: float = _GEMINI_TEMPERATURE
 
@@ -62,28 +61,26 @@ class Config:
 	GEMINI_TOP_K: Optional[int] = None if used_default_top_k else _GEMINI_TOP_K
 
 	CLAUDE_API_KEY: str = os.getenv('ANTHROPIC_API_KEY', '') or os.getenv('CLAUDE_API_KEY', '')
-	CLAUDE_MODEL: str = os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-1')  # Valid models: claude-sonnet-4-0, claude-3-5-sonnet-20241022, claude-3-5-sonnet-latest
+	CLAUDE_MODEL: str = os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-1')  
 
-	# Robust parsing with sane defaults so misconfigured env vars do not crash startup.
 	_CLAUDE_TEMPERATURE, _ = _parse_float('CLAUDE_TEMPERATURE', 0.3)
 	CLAUDE_TEMPERATURE: float = _CLAUDE_TEMPERATURE
 
-	_CLAUDE_MAX_TOKENS, _ = _parse_int('CLAUDE_MAX_TOKENS', 4096)  # Reduced from 8192 for faster responses
+	_CLAUDE_MAX_TOKENS, _ = _parse_int('CLAUDE_MAX_TOKENS', 4096)  
 	CLAUDE_MAX_TOKENS: int = _CLAUDE_MAX_TOKENS
 
 	_CLAUDE_TOP_P, used_default_claude_top_p = _parse_float('CLAUDE_TOP_P', 0.0)
 	CLAUDE_TOP_P: Optional[float] = None if used_default_claude_top_p else _CLAUDE_TOP_P
 
-	_CLAUDE_TIMEOUT, _ = _parse_float('CLAUDE_TIMEOUT', 60.0)  # Timeout in seconds
+	_CLAUDE_TIMEOUT, _ = _parse_float('CLAUDE_TIMEOUT', 60.0)  
 	CLAUDE_TIMEOUT: float = _CLAUDE_TIMEOUT
 
-	_CLAUDE_MAX_RETRIES, _ = _parse_int('CLAUDE_MAX_RETRIES', 2)  # Reduced from 5 for faster failure recovery
+	_CLAUDE_MAX_RETRIES, _ = _parse_int('CLAUDE_MAX_RETRIES', 2)  
 	CLAUDE_MAX_RETRIES: int = _CLAUDE_MAX_RETRIES
 
 	OPENAI_API_KEY: str = os.getenv('OPENAI_API_KEY', '')
-	OPENAI_MODEL: str = os.getenv('OPENAI_MODEL', 'gpt-5-nano')  # Valid models: gpt-4o, gpt-4-turbo, gpt-4o-mini, o1-preview, o3-mini
+	OPENAI_MODEL: str = os.getenv('OPENAI_MODEL', 'gpt-5-nano')  
 
-	# Robust parsing with sane defaults so misconfigured env vars do not crash startup.
 	_OPENAI_TEMPERATURE, _ = _parse_float('OPENAI_TEMPERATURE', 0.2)
 	OPENAI_TEMPERATURE: float = _OPENAI_TEMPERATURE
 
@@ -94,7 +91,7 @@ class Config:
 	OPENAI_TOP_P: Optional[float] = None if used_default_openai_top_p else _OPENAI_TOP_P
 
 	_OPENAI_FREQUENCY_PENALTY, _ = _parse_float('OPENAI_FREQUENCY_PENALTY', 0.3)
-	OPENAI_FREQUENCY_PENALTY: float = _OPENAI_FREQUENCY_PENALTY  # Default 0.3 (ChatOpenAI default)
+	OPENAI_FREQUENCY_PENALTY: float = _OPENAI_FREQUENCY_PENALTY  
 
 	DEFAULT_SEARCH_ENGINE: str = os.getenv('DEFAULT_SEARCH_ENGINE', 'google').strip().lower() or 'google'
 
@@ -110,13 +107,13 @@ class Config:
 
 	ELEVENLABS_API_KEY: str = os.getenv('ELEVENLABS_API_KEY', '')
 	DEEPGRAM_API_KEY: str = os.getenv('DEEPGRAM_API_KEY', '')
-	ELEVENLABS_VOICE_ID: str = os.getenv('ELEVENLABS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM')  # Default: Rachel
+	ELEVENLABS_VOICE_ID: str = os.getenv('ELEVENLABS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM')  
 	DEEPGRAM_LANGUAGE: str = os.getenv('DEEPGRAM_LANGUAGE', 'en-US')
 
 	# Browser highlighting customization
 	HIGHLIGHT_ELEMENTS: bool = os.getenv('HIGHLIGHT_ELEMENTS', 'true').lower() in {'true', '1', 'yes'}
 	DOM_HIGHLIGHT_ELEMENTS: bool = os.getenv('DOM_HIGHLIGHT_ELEMENTS', 'false').lower() in {'true', '1', 'yes'}
-	INTERACTION_HIGHLIGHT_COLOR: str = os.getenv('INTERACTION_HIGHLIGHT_COLOR', 'rgb(255, 127, 39)').strip()  # Orange default
+	INTERACTION_HIGHLIGHT_COLOR: str = os.getenv('INTERACTION_HIGHLIGHT_COLOR', 'rgb(255, 127, 39)').strip()  
 	_INTERACTION_HIGHLIGHT_DURATION, _ = _parse_float('INTERACTION_HIGHLIGHT_DURATION', 1.0)
 	INTERACTION_HIGHLIGHT_DURATION: float = _INTERACTION_HIGHLIGHT_DURATION
 
@@ -124,7 +121,7 @@ class Config:
 	SAVE_HIGHLIGHT_SCREENSHOTS: bool = os.getenv('SAVE_HIGHLIGHT_SCREENSHOTS', 'false').lower() in {'true', '1', 'yes'}
 	SCREENSHOT_DIR: str = os.getenv('SCREENSHOT_DIR', './screenshots').strip()
 	_HIGHLIGHT_SCREENSHOT_DELAY, _ = _parse_float('HIGHLIGHT_SCREENSHOT_DELAY', 0.5)
-	HIGHLIGHT_SCREENSHOT_DELAY: float = _HIGHLIGHT_SCREENSHOT_DELAY  # Delay in seconds to wait for highlight to appear before screenshot
+	HIGHLIGHT_SCREENSHOT_DELAY: float = _HIGHLIGHT_SCREENSHOT_DELAY  
 
 	@classmethod
 	def validate(cls) -> bool:

@@ -72,15 +72,12 @@ async def get_screenshot_base64(integration: BrowserUseIntegration) -> Optional[
         return None
     
     try:
-        # First, check if there's a stored highlight screenshot from the agent
-        # This will have element markings that the regular screenshot won't have
         if integration._state and integration._state.agent:
             agent = integration._state.agent
             if hasattr(agent, '_last_highlight_screenshot_base64') and agent._last_highlight_screenshot_base64:
                 logger.debug('Using stored highlight screenshot for frontend')
                 return agent._last_highlight_screenshot_base64
         
-        # Fallback to regular screenshot if no highlight screenshot available
         state = await integration._state.controller.refresh_state(
             include_dom=False,
             include_screenshot=True,
@@ -89,7 +86,6 @@ async def get_screenshot_base64(integration: BrowserUseIntegration) -> Optional[
         if state and hasattr(state, 'screenshot') and state.screenshot:
             screenshot_b64 = state.screenshot
             if isinstance(screenshot_b64, str):
-                # Ensure it's a data URL or base64
                 if screenshot_b64.startswith('data:image'):
                     return screenshot_b64
                 elif not screenshot_b64.startswith('data:'):
@@ -102,7 +98,7 @@ async def get_screenshot_base64(integration: BrowserUseIntegration) -> Optional[
 
 
 async def ensure_browser_initialized() -> bool:
-    """Start browser only when first query is made."""
+    #Start browser only when first query is made.
     global _browser_manager, _text_integration, _last_activity_time
     
     if _browser_manager and await _browser_manager.is_running():
@@ -128,7 +124,6 @@ async def ensure_browser_initialized() -> bool:
     logger.info(f'CDP endpoint ready: {_browser_manager.endpoint}')
     logger.info(f'WebSocket URL: {ws_url}')
     
-    # Initialize text mode integration
     _text_integration = BrowserUseIntegration(
         cdp_url=ws_url,
         default_search_engine=Config.DEFAULT_SEARCH_ENGINE,
@@ -148,19 +143,18 @@ async def cleanup_browser_if_idle() -> None:
     
     while True:
         try:
-            await asyncio.sleep(30)  # Check every 30 seconds
+            await asyncio.sleep(30) 
             
             if _browser_manager and await _browser_manager.is_running():
                 current_time = time.time()
                 idle_time = current_time - _last_activity_time
                 
-                # Cleanup if idle for too long and no active connections
                 if idle_time > _idle_timeout and len(_active_connections) == 0:
                     logger.info(f"Browser idle for {idle_time:.1f}s, cleaning up...")
                     await cleanup_browser()
         except Exception as e:
             logger.error(f"Error in cleanup task: {e}", exc_info=True)
-            await asyncio.sleep(60)  # Wait longer on error
+            await asyncio.sleep(60)
 
 
 async def cleanup_browser() -> None:
@@ -211,7 +205,6 @@ async def startup():
     
     logger.info("Starting API server... (browser will start on first query)")
     
-    # Start background cleanup task
     _cleanup_task = asyncio.create_task(cleanup_browser_if_idle())
     
     logger.info("API server ready")
@@ -237,20 +230,17 @@ async def query_text(request: QueryRequest):
     """Handle text mode queries with SSE streaming."""
     global _text_integration, _active_connections, _last_activity_time
     
-    # Lazy initialization: start browser on first query
     if not await ensure_browser_initialized():
         return StreamingResponse(
             iter([b'data: {"type": "error", "error": "Failed to initialize browser"}\n\n']),
             media_type="text/event-stream",
         )
     
-    # Track active connection using a unique identifier
     import uuid
     connection_id = str(uuid.uuid4())
     _active_connections.add(connection_id)
     _last_activity_time = time.time()
     
-    # Override provider if specified in request
     original_provider = Config.LLM_PROVIDER
     provider_changed = False
     if request.provider:
@@ -259,7 +249,6 @@ async def query_text(request: QueryRequest):
             provider_changed = True
             Config.LLM_PROVIDER = provider
             logger.info(f"Switching provider to: {provider}")
-            # Save browser session URL before reinitializing
             cdp_url = None
             if _text_integration and _text_integration._state:
                 try:
@@ -267,12 +256,10 @@ async def query_text(request: QueryRequest):
                 except Exception:
                     pass
             
-            # Shutdown and reinitialize with new provider
             try:
                 if _text_integration:
                     await _text_integration.shutdown()
                 
-                # Get CDP URL from browser manager if we lost it
                 if not cdp_url and _browser_manager:
                     cdp_url = await _browser_manager.websocket_url()
                 
@@ -314,7 +301,6 @@ async def query_text(request: QueryRequest):
             if phase == 'before':
                 step_counter[0] = step
                 
-                # Get screenshot if available
                 screenshot = None
                 if _text_integration:
                     try:
@@ -322,7 +308,6 @@ async def query_text(request: QueryRequest):
                     except Exception as e:
                         logger.debug('Failed to get screenshot: %s', e)
                 
-                # Queue step data
                 data = {
                     "type": "step",
                     "step": step,
@@ -333,11 +318,9 @@ async def query_text(request: QueryRequest):
                 }
                 await queue.put(data)
         
-        # Update callbacks
         original_step = _text_integration.step_callback
         _text_integration.update_callbacks(step_callback=step_callback)
         
-        # Run agent in background task
         async def run_agent():
             try:
                 result = await _text_integration.run(request.query, is_continuation=False)
@@ -352,22 +335,18 @@ async def query_text(request: QueryRequest):
         try:
             while not run_complete.is_set() or not queue.empty():
                 try:
-                    # Wait for queue item with timeout
                     try:
                         data = await asyncio.wait_for(queue.get(), timeout=0.1)
                         yield f"data: {json.dumps(data)}\n\n".encode()
                     except asyncio.TimeoutError:
-                        # Check if run completed
                         if run_complete.is_set():
                             break
                         continue
                 except Exception as e:
                     logger.debug('Error in queue processing: %s', e)
             
-            # Wait for run to complete
             await run_task
             
-            # Send completion or error
             if run_error[0]:
                 error_data = {"type": "error", "error": str(run_error[0])}
                 yield f'data: {json.dumps(error_data)}\n\n'.encode()
@@ -384,18 +363,11 @@ async def query_text(request: QueryRequest):
             error_data = {"type": "error", "error": str(e)}
             yield f'data: {json.dumps(error_data)}\n\n'.encode()
         finally:
-            # Restore original callback
             if _text_integration:
                 _text_integration.update_callbacks(step_callback=original_step)
-            # Remove connection tracking
             _active_connections.discard(connection_id)
             _last_activity_time = time.time()
             
-            # If no more connections, browser will be cleaned up by idle timeout
-            # Note: We keep the new provider for subsequent requests
-            # If you want to restore the original, uncomment below:
-            # if provider_changed:
-            #     Config.LLM_PROVIDER = original_provider
     
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -431,17 +403,14 @@ async def websocket_voice(websocket: WebSocket):
             return False
     
     try:
-        # Lazy initialization: start browser on first voice connection
         if not await ensure_browser_initialized():
             await safe_send_json({"type": "error", "error": "Failed to initialize browser"})
             return
         
-        # Track voice connection
         voice_connection_id = f"voice_{id(websocket)}"
         _active_connections.add(voice_connection_id)
         _last_activity_time = time.time()
         
-        # Initialize voice integration if not already done
         if not _voice_integration:
             if not Config.validate_voice():
                 await safe_send_json({"type": "error", "error": "Voice configuration invalid"})
@@ -467,7 +436,6 @@ async def websocket_voice(websocket: WebSocket):
                 return
         
         # Step callback to send step data (narration, screenshots) to frontend
-        # Set this FIRST so it's preserved when bridge saves original_step
         async def step_callback(step: int, reasoning: str, narration: str, tool: str, phase: str) -> None:
             """Send step updates to frontend via WebSocket."""
             if phase == 'before':
@@ -477,7 +445,6 @@ async def websocket_voice(websocket: WebSocket):
                 
                 logger.debug('Step callback: Sending step %d to frontend', step)
                 
-                # Get screenshot if available
                 screenshot = None
                 if _voice_integration:
                     try:
@@ -485,7 +452,6 @@ async def websocket_voice(websocket: WebSocket):
                     except Exception as e:
                         logger.debug('Failed to get screenshot: %s', e)
                 
-                # Send step data
                 sent = await safe_send_json({
                     "type": "step",
                     "step": step,
@@ -499,10 +465,8 @@ async def websocket_voice(websocket: WebSocket):
                 else:
                     logger.warning('Step callback: Failed to send step %d to frontend', step)
         
-        # Set step callback on integration BEFORE creating bridge
         _voice_integration.update_callbacks(step_callback=step_callback)
         
-        # Create agent bridge with safe callbacks for this connection
         async def on_user_speech(text: str) -> None:
             if is_connected():
                 await safe_send_json({"type": "user_speech", "text": text})
@@ -511,7 +475,6 @@ async def websocket_voice(websocket: WebSocket):
             if is_connected():
                 await safe_send_json({"type": "agent_response", "text": text})
         
-        # Create or update bridge
         if not _voice_bridge:
             _voice_bridge = AgentBridge(
                 integration=_voice_integration,
@@ -519,11 +482,9 @@ async def websocket_voice(websocket: WebSocket):
                 on_agent_response=on_agent_response,
             )
         else:
-            # Update callbacks for this connection
             _voice_bridge.on_user_speech = on_user_speech
             _voice_bridge.on_agent_response = on_agent_response
         
-        # Initialize or reuse voice pipeline
         if not _voice_pipeline:
             _voice_pipeline = VoicePipeline(
                 agent_bridge=_voice_bridge,
@@ -537,33 +498,26 @@ async def websocket_voice(websocket: WebSocket):
                 await safe_send_json({"type": "error", "error": "Failed to initialize voice pipeline"})
                 return
             
-            # Set WebSocket sender for audio streaming
             _voice_pipeline.set_websocket_sender(safe_send_json)
             
-            # Run pipeline in background (only once)
             pipeline_task = asyncio.create_task(_voice_pipeline.run())
         else:
-            # Update WebSocket sender for this connection
             _voice_pipeline.set_websocket_sender(safe_send_json)
         
-        # Send ready message
         if not await safe_send_json({"type": "ready"}):
             logger.warning("Failed to send ready message, connection may be closed")
             return
         
-        # Handle WebSocket messages
         while is_connected():
             try:
                 data = await websocket.receive_json()
                 
                 if data.get("type") == "text_input":
-                    # Handle text input (for testing or fallback)
                     text = data.get("text", "")
                     if text and _voice_bridge:
                         await _voice_bridge.process_user_text(text)
                 
                 elif data.get("type") == "stop":
-                    # Stop voice pipeline
                     break
                     
             except WebSocketDisconnect:
@@ -584,22 +538,16 @@ async def websocket_voice(websocket: WebSocket):
         if is_connected():
             await safe_send_json({"type": "error", "error": str(e)})
     finally:
-        # Don't stop the pipeline when a connection closes - keep it running
-        # The pipeline will be stopped on server shutdown
-        # Just clear the callbacks for this connection
         if _voice_bridge:
             _voice_bridge.on_user_speech = None
             _voice_bridge.on_agent_response = None
-        # Clear step callback
         if _voice_integration:
             _voice_integration.update_callbacks(step_callback=None)
         
-        # Remove connection tracking
         if voice_connection_id:
             _active_connections.discard(voice_connection_id)
         _last_activity_time = time.time()
         
-        # Close websocket if still connected
         if is_connected() and not connection_closed:
             try:
                 await websocket.close()
@@ -616,8 +564,6 @@ async def cleanup_endpoint():
     _active_connections.clear()
     _last_activity_time = 0.0
     
-    # Trigger immediate cleanup (browser will close due to idle timeout check)
-    # Don't await to avoid blocking the response
     asyncio.create_task(cleanup_browser())
     
     return {"status": "cleanup initiated"}
@@ -637,6 +583,5 @@ if __name__ == "__main__":
         format='%(levelname)-8s | %(message)s',
     )
     
-    # Cloud Run sets PORT environment variable, default to 8000 for local
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)

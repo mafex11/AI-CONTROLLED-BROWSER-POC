@@ -26,7 +26,6 @@ _CALLBACK_SENTINEL = object()
 
 
 def _quiet_browser_use_logs() -> None:
-	"""Suppress noisy browser-use logs."""
 	for name, level in {
 		'httpx': logging.WARNING,
 		'cdp_use': logging.WARNING,
@@ -35,8 +34,8 @@ def _quiet_browser_use_logs() -> None:
 		'browser_use.observability': logging.WARNING,
 		'browser_use.tools.service': logging.WARNING,
 		'browser_use.BrowserSession': logging.INFO,
-		'browser_use.browser.watchdogs.aboutblank_watchdog': logging.WARNING,  # Suppress EventBus capacity errors
-		'bubus': logging.WARNING,  # Suppress EventBus capacity warnings
+		'browser_use.browser.watchdogs.aboutblank_watchdog': logging.WARNING,  
+		'bubus': logging.WARNING,  
 	}.items():
 		logging.getLogger(name).setLevel(level)
 	
@@ -99,7 +98,6 @@ class BrowserUseIntegration:
 			observation_builder = ObservationPromptBuilder(search_engine=self.default_search_engine)
 			answer_builder = AnswerPromptBuilder()
 
-			# Calculate max_missing_action_retries based on provider
 			max_output_tokens = (
 				Config.GEMINI_MAX_OUTPUT_TOKENS
 				if Config.LLM_PROVIDER == 'gemini'
@@ -131,7 +129,7 @@ class BrowserUseIntegration:
 			)
 			self._initialized = True
 			return True
-		except Exception as error:  # noqa: BLE001
+		except Exception as error:
 			logger.error('Failed to initialize browser integration: %s', error, exc_info=True)
 			self._initialized = False
 			return False
@@ -207,18 +205,15 @@ class BrowserUseIntegration:
 				temperature=Config.CLAUDE_TEMPERATURE,
 				max_tokens=Config.CLAUDE_MAX_TOKENS,
 				top_p=Config.CLAUDE_TOP_P,
-				timeout=Timeout(Config.CLAUDE_TIMEOUT, connect=10.0),  # Set timeout for faster failures
-				max_retries=Config.CLAUDE_MAX_RETRIES,  # Reduced retries for faster error handling
-			)
+				timeout=Timeout(Config.CLAUDE_TIMEOUT, connect=10.0), 
+				max_retries=Config.CLAUDE_MAX_RETRIES,  
 		elif Config.LLM_PROVIDER == 'openai':
-			# Build kwargs - frequency_penalty should always be passed (default 0.3)
-			# because reasoning models try to delete it from model_params
 			openai_kwargs = {
 				'model': Config.OPENAI_MODEL,
 				'api_key': Config.OPENAI_API_KEY,
 				'temperature': Config.OPENAI_TEMPERATURE,
 				'max_completion_tokens': Config.OPENAI_MAX_TOKENS,
-				'frequency_penalty': Config.OPENAI_FREQUENCY_PENALTY,  # Always pass (default 0.3)
+				'frequency_penalty': Config.OPENAI_FREQUENCY_PENALTY,
 				'max_retries': 5,
 			}
 			if Config.OPENAI_TOP_P is not None:
@@ -231,7 +226,6 @@ class BrowserUseIntegration:
 		if not self.cdp_url:
 			raise RuntimeError('cdp_url is required to connect to Chromium.')
 
-		# Create custom browser profile with highlight customization
 		browser_profile = BrowserProfile(
 			highlight_elements=Config.HIGHLIGHT_ELEMENTS,
 			dom_highlight_elements=Config.DOM_HIGHLIGHT_ELEMENTS,
@@ -248,10 +242,8 @@ class BrowserUseIntegration:
 		await asyncio.sleep(0.1)
 		
 		# Inject script to prevent new tabs from opening
-		# This script runs on every new document/page load
 		prevent_new_tabs_script = """
 		(function() {
-			// Remove target="_blank" from all links
 			function removeTargetBlank() {
 				const links = document.querySelectorAll('a[target="_blank"], a[target="blank"]');
 				links.forEach(link => {
@@ -259,42 +251,33 @@ class BrowserUseIntegration:
 				});
 			}
 			
-			// Override window.open to open in same tab instead
 			const originalWindowOpen = window.open;
 			window.open = function(url, target, features) {
 				if (target === '_blank' || target === 'blank') {
-					// Open in same tab instead
 					if (url) {
 						window.location.href = url;
 					}
 					return window;
 				}
-				// For other targets, use original behavior
 				return originalWindowOpen.call(window, url, target, features);
 			};
 			
-			// Setup function to initialize all handlers
 			function setupHandlers() {
-				// Intercept clicks on links with target="_blank"
 				document.addEventListener('click', function(e) {
 					let element = e.target;
-					// Traverse up to find the link element
 					while (element && element.tagName !== 'A') {
 						element = element.parentElement;
 					}
 					if (element && element.tagName === 'A') {
 						const target = element.getAttribute('target');
 						if (target === '_blank' || target === 'blank') {
-							// Remove target attribute and let default click behavior happen
 							element.removeAttribute('target');
 						}
 					}
-				}, true); // Use capture phase to catch before default behavior
+				}, true); 
 				
-				// Remove target="_blank" from existing links
 				removeTargetBlank();
 				
-				// Also remove on dynamic content changes (MutationObserver)
 				if (document.body || document.documentElement) {
 					const observer = new MutationObserver(function(mutations) {
 						removeTargetBlank();
@@ -306,7 +289,6 @@ class BrowserUseIntegration:
 				}
 			}
 			
-			// Initialize handlers when document is ready
 			if (document.readyState === 'loading') {
 				document.addEventListener('DOMContentLoaded', setupHandlers);
 			} else {
@@ -316,11 +298,9 @@ class BrowserUseIntegration:
 		"""
 		
 		try:
-			# Add the script to run on every new document
-			# Using private method _cdp_add_init_script as it's the only way to inject init scripts
 			await session._cdp_add_init_script(prevent_new_tabs_script)
 			logger.debug('Injected script to prevent new tabs from opening')
-		except Exception as error:  # noqa: BLE001
+		except Exception as error:
 			logger.warning('Failed to inject prevent-new-tabs script: %s', error)
 		
 		return session

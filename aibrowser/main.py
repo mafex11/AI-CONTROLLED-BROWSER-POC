@@ -18,7 +18,6 @@ LOGGER = logging.getLogger(__name__)
 
 def setup_logging() -> None:
 	log_format = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
-	# Use INFO level, but enable DEBUG for aibrowser package
 	logging.basicConfig(level=logging.INFO, format=log_format)
 	logging.getLogger('aibrowser').setLevel(logging.DEBUG)
 	logging.getLogger('asyncio').setLevel(logging.WARNING)

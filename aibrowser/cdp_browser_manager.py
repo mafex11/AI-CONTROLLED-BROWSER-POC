@@ -55,7 +55,7 @@ class CDPBrowserManager:
 				first = result.stdout.strip().splitlines()[0]
 				if first and Path(first).exists():
 					return Path(first)
-		except Exception as error:  # noqa: BLE001
+		except Exception as error:
 			logger.debug('Unable to locate Chrome in PATH: %s', error)
 		return None
 
@@ -148,7 +148,7 @@ class CDPBrowserManager:
 					if response.status == 200:
 						data = await response.json()
 						return data.get('webSocketDebuggerUrl')
-		except Exception as error:  # noqa: BLE001
+		except Exception as error: 
 			logger.error('Failed to fetch websocket debugger URL: %s', error, exc_info=True)
 		return None
 
