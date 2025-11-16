@@ -72,11 +72,11 @@ GEMINI_MODEL=gemini-2.5-flash
 
 # Claude Configuration (if using Claude)
 # ANTHROPIC_API_KEY=your_anthropic_api_key_here
-# CLAUDE_MODEL=claude-sonnet-4-1
+# CLAUDE_MODEL=claude-sonnet-4-5
 
 # OpenAI Configuration (if using OpenAI)
 # OPENAI_API_KEY=your_openai_api_key_here
-# OPENAI_MODEL=gpt-4o
+# OPENAI_MODEL=gpt-5-nano
 
 # Voice Mode Configuration (required for voice mode)
 DEEPGRAM_API_KEY=your_deepgram_api_key_here
