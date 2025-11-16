@@ -1,13 +1,23 @@
 # AI Voice Controlled Browser POC
 
-A proof-of-concept application that enables AI-controlled browser automation with both text and voice interaction modes. The browser can be controlled through natural language commands, allowing you to interact with web pages using AI assistance.
+A proof-of-concept application that demonstrates a voice agent capable of performing browser navigation and completing multi-step tasks on websites. Built using **Pipecat** for voice interaction and **Browser Use** for browser automation.
+
+## Overview
+
+This POC showcases a voice-controlled browser agent that can:
+- Accept voice commands through speech recognition (Deepgram)
+- Verbally explain its actions as it navigates and interacts with web pages
+- Complete multi-step tasks with natural language narration
+- Pause before final actions to explain options and wait for user confirmation
+
 
 ## Features
 
+- **Voice Mode**: Voice-controlled browser interaction using Pipecat, Deepgram (STT), and ElevenLabs (TTS)
 - **Text Mode**: Interactive command-line interface for browser control
-- **Voice Mode**: Voice-controlled browser interaction using speech recognition and text-to-speech
 - **Multiple LLM Providers**: Support for Gemini, Claude, and OpenAI
 - **Real-time Browser Control**: Direct control of Chromium browser via Chrome DevTools Protocol
+- **Verbal Narration**: Agent explains its actions verbally as it navigates and interacts with web pages
 
 ## Prerequisites
 
@@ -101,7 +111,7 @@ python -m aibrowser.main
 
 In text mode, you can type commands and the AI will execute browser actions. Type `exit`, `quit`, or `q` to stop.
 
-### Voice Controlled Mode
+### Voice Controlled Mode (POC Demo)
 
 Run the voice-controlled browser:
 
@@ -109,7 +119,12 @@ Run the voice-controlled browser:
 python -m aibrowser.main_voice
 ```
 
-In voice mode, speak your commands and the AI will respond with voice feedback. Say "exit" or "quit" to stop.
+In voice mode, speak your commands and the AI will respond with voice feedback. The agent will:
+- Listen to your voice commands via Deepgram speech-to-text
+- Verbally explain each action it takes
+- Navigate and interact with web pages automatically
+- Pause before final actions to explain options and wait for confirmation
+
 
 **Note**: Voice mode requires both `DEEPGRAM_API_KEY` and `ELEVENLABS_API_KEY` to be set in your `.env` file.
 

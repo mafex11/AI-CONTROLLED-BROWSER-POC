@@ -204,10 +204,21 @@ class AgentBridge:
 						if not (message.startswith('{') or message.startswith('[') or 'index=' in message.lower()):
 							logger.debug(f'Step {step} (before): {message}')
 							_last_tts_message = message
-							# Send TTS async - don't wait for it to complete
-							# Audio is streamed to frontend, so we can't track local completion
-							# Execute action immediately instead of waiting
-							asyncio.create_task(self._send_to_tts(message))
+							# Send TTS and wait for it to complete before proceeding
+							await self._send_to_tts(message)
+							
+							# Wait for TTS to be sent to pipeline (queue processing)
+							# Give a small delay to ensure the message is picked up from queue
+							await asyncio.sleep(0.1)
+							
+							# Wait for speech to complete before allowing tool execution
+							if self._speech_tracker:
+								try:
+									logger.debug(f'Waiting for speech completion before step {step} tool execution...')
+									await self._speech_tracker.wait_for_speech_completion(timeout=30.0)
+									logger.debug(f'Speech completed, proceeding with step {step} tool execution')
+								except Exception as e:
+									logger.warning(f'Error waiting for speech completion: {e}, proceeding anyway')
 					
 					return
 				elif phase == 'after':

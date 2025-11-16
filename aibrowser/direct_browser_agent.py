@@ -374,10 +374,11 @@ class DirectBrowserAgent:
 				if not agent_response_text:
 					agent_response_text = 'Preparing to execute action...'
 			
-			# Show highlight and take screenshot BEFORE step callback for click/input actions
-			# This ensures the step callback gets the highlighted screenshot with element markings
-			# Always do this (not just when saving to disk) so frontend gets marked screenshots
-			if action_type in {'click', 'input'}:
+			# Take screenshot BEFORE step callback for click/input actions (if needed)
+			# Note: Preview highlights are disabled - only action-time highlights will show
+			# Action-time highlights are controlled by HIGHLIGHT_ELEMENTS in BrowserProfile
+			# Skip if highlighting is disabled globally
+			if action_type in {'click', 'input'} and Config.HIGHLIGHT_ELEMENTS:
 				await self._preview_and_capture_highlight(action_type, action_payload, step)
 			
 			if self.step_callback and agent_response_text and tool_info:
@@ -772,10 +773,18 @@ class DirectBrowserAgent:
 	async def _preview_and_capture_highlight(self, action_type: str, payload: Dict[str, Any], step: int) -> str | None:
 		"""Show highlight indicator and capture screenshot before action execution."""
 		
+		# Skip preview highlights - user wants only action-time highlights, not preview highlights
+		# The browser-use library will still show highlights during actual action execution
+		# if HIGHLIGHT_ELEMENTS is enabled in BrowserProfile
+		
+		# Skip if highlighting is disabled globally
+		if not Config.HIGHLIGHT_ELEMENTS:
+			return None
+		
 		try:
 			node = None
 			
-			# Get the element node to highlight
+			# Get the element node (for screenshot purposes, not highlighting)
 			if action_type == 'click' and payload.get('index') is not None:
 				node = await self.controller.browser_session.get_element_by_index(payload['index'])
 			elif action_type == 'input' and payload.get('index') is not None:
@@ -789,11 +798,11 @@ class DirectBrowserAgent:
 				logger.warning('Could not find element node for highlight preview')
 				return None
 			
-			# Show highlight indicator before executing action
-			await self.controller.browser_session.highlight_interaction_element(node)
+			# Don't show preview highlight - user wants only action-time highlights
+			# await self.controller.browser_session.highlight_interaction_element(node)
 			
-			# Wait for highlight to fully appear and be visible
-			await asyncio.sleep(Config.HIGHLIGHT_SCREENSHOT_DELAY)
+			# No need to wait for highlight since we're not showing it
+			# await asyncio.sleep(Config.HIGHLIGHT_SCREENSHOT_DELAY)
 			
 			# Take screenshot with highlight visible
 			# We'll capture it to a temporary location first, then read it for base64
