@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Dark theme with zinc-800 to zinc-950 */
+    --background: 240 5.9% 10%; /* zinc-950 */
+    --foreground: 0 0% 98%; /* zinc-50 */
+    --card: 240 5.9% 13.5%; /* zinc-900 */
+    --card-foreground: 0 0% 98%; /* zinc-50 */
+    --popover: 240 5.9% 13.5%; /* zinc-900 */
+    --popover-foreground: 0 0% 98%; /* zinc-50 */
+    --primary: 0 0% 98%; /* zinc-50 */
+    --primary-foreground: 240 5.9% 10%; /* zinc-950 */
+    --secondary: 240 5.9% 18%; /* zinc-800 */
+    --secondary-foreground: 0 0% 98%; /* zinc-50 */
+    --muted: 240 5.9% 18%; /* zinc-800 */
+    --muted-foreground: 240 4.8% 65%; /* zinc-400 */
+    --accent: 240 5.9% 18%; /* zinc-800 */
+    --accent-foreground: 0 0% 98%; /* zinc-50 */
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%; /* zinc-50 */
+    --border: 240 5.9% 18%; /* zinc-800 */
+    --input: 240 5.9% 18%; /* zinc-800 */
+    --ring: 240 5.9% 25%; /* zinc-700 */
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+

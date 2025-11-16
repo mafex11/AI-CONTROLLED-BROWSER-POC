@@ -134,4 +134,4 @@ yarn-error.log*
 next-env.d.ts
 
 /my_screenshots
-/frontend
+# /frontend
