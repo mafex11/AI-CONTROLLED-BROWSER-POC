@@ -30,7 +30,7 @@ export function ScreenshotDisplay({
         <CardHeader className="pb-3">
           <CardTitle className="text-lg flex items-center gap-2">
             <ImageIcon className="h-4 w-4" />
-            Step {step} - Screenshot
+            View
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -42,7 +42,7 @@ export function ScreenshotDisplay({
           >
             <motion.img
               src={imageSrc}
-              alt={`Screenshot for step ${step}`}
+              alt="Screenshot view"
               className={`w-full h-auto ${
                 isExpanded ? "max-h-none" : "max-h-96 object-contain"
               }`}

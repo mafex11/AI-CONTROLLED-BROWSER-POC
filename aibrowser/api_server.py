@@ -7,6 +7,7 @@ import base64
 import logging
 import os
 import sys
+import time
 from typing import Optional
 
 import aiohttp
@@ -26,9 +27,20 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="AI Browser API")
 
 # CORS middleware for frontend
+# Allow localhost for development and Vercel/production domains
+allowed_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    # Add your Vercel domain here after deployment
+    # "https://your-app.vercel.app",
+]
+# Also allow any origin if ALLOW_ALL_ORIGINS is set (for development)
+if os.getenv("ALLOW_ALL_ORIGINS", "false").lower() in {"true", "1", "yes"}:
+    allowed_origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -41,10 +53,17 @@ _voice_integration: Optional[BrowserUseIntegration] = None
 _voice_pipeline: Optional[VoicePipeline] = None
 _voice_bridge: Optional[AgentBridge] = None
 
+# Connection tracking for cleanup
+_active_connections: set = set()
+_last_activity_time: float = 0.0
+_cleanup_task: Optional[asyncio.Task] = None
+_idle_timeout: float = float(os.getenv("BROWSER_IDLE_TIMEOUT", "300"))  # 5 minutes default
+
 
 class QueryRequest(BaseModel):
     query: str
     voiceMode: bool = False
+    provider: Optional[str] = None
 
 
 async def get_screenshot_base64(integration: BrowserUseIntegration) -> Optional[str]:
@@ -83,30 +102,29 @@ async def get_screenshot_base64(integration: BrowserUseIntegration) -> Optional[
     return None
 
 
-@app.on_event("startup")
-async def startup():
-    """Initialize browser manager and integrations."""
-    global _browser_manager, _text_integration, _voice_integration
+async def ensure_browser_initialized() -> bool:
+    """Lazy initialization: start browser only when first query is made."""
+    global _browser_manager, _text_integration, _last_activity_time
     
-    if not Config.validate():
-        logger.error("Configuration validation failed")
-        sys.exit(1)
+    if _browser_manager and await _browser_manager.is_running():
+        _last_activity_time = time.time()
+        return True
     
-    logger.info("Starting API server...")
+    logger.info("Initializing browser for first query...")
     
-    port = int(os.getenv('CHROME_DEBUG_PORT', '9223'))  # Different port to avoid conflicts
+    port = int(os.getenv('CHROME_DEBUG_PORT', '9222'))
     headless = os.getenv('CHROMIUM_HEADLESS', 'false').lower() in {'1', 'true', 'yes', 'on'}
     
     _browser_manager = CDPBrowserManager(port=port, headless=headless)
     started = await _browser_manager.start()
     if not started or _browser_manager.endpoint is None:
-        logger.error('Failed to start Chromium for API server')
-        sys.exit(1)
+        logger.error('Failed to start Chromium')
+        return False
     
     ws_url = await _browser_manager.websocket_url()
     if not ws_url:
         logger.error('Failed to get WebSocket URL')
-        sys.exit(1)
+        return False
     
     logger.info(f'CDP endpoint ready: {_browser_manager.endpoint}')
     logger.info(f'WebSocket URL: {ws_url}')
@@ -118,7 +136,84 @@ async def startup():
     )
     if not await _text_integration.initialize():
         logger.error('Failed to initialize text integration')
+        return False
+    
+    _last_activity_time = time.time()
+    logger.info("Browser initialized and ready")
+    return True
+
+
+async def cleanup_browser_if_idle() -> None:
+    """Background task to cleanup browser after idle timeout."""
+    global _browser_manager, _text_integration, _last_activity_time
+    
+    while True:
+        try:
+            await asyncio.sleep(30)  # Check every 30 seconds
+            
+            if _browser_manager and await _browser_manager.is_running():
+                current_time = time.time()
+                idle_time = current_time - _last_activity_time
+                
+                # Cleanup if idle for too long and no active connections
+                if idle_time > _idle_timeout and len(_active_connections) == 0:
+                    logger.info(f"Browser idle for {idle_time:.1f}s, cleaning up...")
+                    await cleanup_browser()
+        except Exception as e:
+            logger.error(f"Error in cleanup task: {e}", exc_info=True)
+            await asyncio.sleep(60)  # Wait longer on error
+
+
+async def cleanup_browser() -> None:
+    """Cleanup browser and integration resources."""
+    global _browser_manager, _text_integration, _voice_integration, _voice_pipeline, _voice_bridge
+    
+    logger.info("Cleaning up browser resources...")
+    
+    if _voice_pipeline:
+        try:
+            await _voice_pipeline.stop()
+        except Exception:
+            pass
+        _voice_pipeline = None
+    
+    if _text_integration:
+        try:
+            await _text_integration.shutdown()
+        except Exception:
+            pass
+        _text_integration = None
+    
+    if _voice_integration:
+        try:
+            await _voice_integration.shutdown()
+        except Exception:
+            pass
+        _voice_integration = None
+    
+    if _browser_manager:
+        try:
+            await _browser_manager.stop()
+        except Exception:
+            pass
+        _browser_manager = None
+    
+    logger.info("Browser cleanup complete")
+
+
+@app.on_event("startup")
+async def startup():
+    """Initialize API server without starting browser."""
+    global _cleanup_task
+    
+    if not Config.validate():
+        logger.error("Configuration validation failed")
         sys.exit(1)
+    
+    logger.info("Starting API server... (browser will start on first query)")
+    
+    # Start background cleanup task
+    _cleanup_task = asyncio.create_task(cleanup_browser_if_idle())
     
     logger.info("API server ready")
 
@@ -126,43 +221,86 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     """Cleanup on shutdown."""
-    global _browser_manager, _text_integration, _voice_integration, _voice_pipeline
+    global _cleanup_task
     
-    if _voice_pipeline:
+    if _cleanup_task:
+        _cleanup_task.cancel()
         try:
-            await _voice_pipeline.stop()
-        except Exception:
+            await _cleanup_task
+        except asyncio.CancelledError:
             pass
     
-    if _text_integration:
-        try:
-            await _text_integration.shutdown()
-        except Exception:
-            pass
-    
-    if _voice_integration:
-        try:
-            await _voice_integration.shutdown()
-        except Exception:
-            pass
-    
-    if _browser_manager:
-        try:
-            await _browser_manager.stop()
-        except Exception:
-            pass
+    await cleanup_browser()
 
 
 @app.post("/api/query")
 async def query_text(request: QueryRequest):
     """Handle text mode queries with SSE streaming."""
-    global _text_integration
+    global _text_integration, _active_connections, _last_activity_time
     
-    if not _text_integration:
+    # Lazy initialization: start browser on first query
+    if not await ensure_browser_initialized():
         return StreamingResponse(
-            iter([b'data: {"type": "error", "error": "Integration not initialized"}\n\n']),
+            iter([b'data: {"type": "error", "error": "Failed to initialize browser"}\n\n']),
             media_type="text/event-stream",
         )
+    
+    # Track active connection using a unique identifier
+    import uuid
+    connection_id = str(uuid.uuid4())
+    _active_connections.add(connection_id)
+    _last_activity_time = time.time()
+    
+    # Override provider if specified in request
+    original_provider = Config.LLM_PROVIDER
+    provider_changed = False
+    if request.provider:
+        provider = request.provider.strip().lower()
+        if provider in {'gemini', 'claude', 'openai'} and provider != Config.LLM_PROVIDER:
+            provider_changed = True
+            Config.LLM_PROVIDER = provider
+            logger.info(f"Switching provider to: {provider}")
+            # Save browser session URL before reinitializing
+            cdp_url = None
+            if _text_integration and _text_integration._state:
+                try:
+                    cdp_url = _text_integration.cdp_url
+                except Exception:
+                    pass
+            
+            # Shutdown and reinitialize with new provider
+            try:
+                if _text_integration:
+                    await _text_integration.shutdown()
+                
+                # Get CDP URL from browser manager if we lost it
+                if not cdp_url and _browser_manager:
+                    cdp_url = await _browser_manager.websocket_url()
+                
+                if cdp_url:
+                    _text_integration = BrowserUseIntegration(
+                        cdp_url=cdp_url,
+                        default_search_engine=Config.DEFAULT_SEARCH_ENGINE,
+                    )
+                    if not await _text_integration.initialize():
+                        Config.LLM_PROVIDER = original_provider
+                        return StreamingResponse(
+                            iter([b'data: {"type": "error", "error": "Failed to initialize with provider"}\n\n']),
+                            media_type="text/event-stream",
+                        )
+                else:
+                    Config.LLM_PROVIDER = original_provider
+                    return StreamingResponse(
+                        iter([b'data: {"type": "error", "error": "Failed to get browser connection"}\n\n']),
+                        media_type="text/event-stream",
+                    )
+            except Exception as e:
+                logger.error(f"Failed to switch provider: {e}", exc_info=True)
+                Config.LLM_PROVIDER = original_provider
+                return StreamingResponse(
+                    iter([b'data: {"type": "error", "error": f"Failed to switch provider: {str(e)}"}\n\n']),
+                    media_type="text/event-stream",
+                )
     
     async def generate():
         import json
@@ -248,7 +386,17 @@ async def query_text(request: QueryRequest):
             yield f'data: {json.dumps(error_data)}\n\n'.encode()
         finally:
             # Restore original callback
-            _text_integration.update_callbacks(step_callback=original_step)
+            if _text_integration:
+                _text_integration.update_callbacks(step_callback=original_step)
+            # Remove connection tracking
+            _active_connections.discard(connection_id)
+            _last_activity_time = time.time()
+            
+            # If no more connections, browser will be cleaned up by idle timeout
+            # Note: We keep the new provider for subsequent requests
+            # If you want to restore the original, uncomment below:
+            # if provider_changed:
+            #     Config.LLM_PROVIDER = original_provider
     
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -256,13 +404,14 @@ async def query_text(request: QueryRequest):
 @app.websocket("/ws/voice")
 async def websocket_voice(websocket: WebSocket):
     """Handle voice mode WebSocket connection."""
-    global _voice_integration, _voice_pipeline, _voice_bridge, _browser_manager
+    global _voice_integration, _voice_pipeline, _voice_bridge, _browser_manager, _active_connections, _last_activity_time
     
     await websocket.accept()
     logger.info("Voice WebSocket connection established")
     
     pipeline_task = None
     connection_closed = False
+    voice_connection_id = None
     
     def is_connected() -> bool:
         """Check if websocket is still connected."""
@@ -283,15 +432,29 @@ async def websocket_voice(websocket: WebSocket):
             return False
     
     try:
+        # Lazy initialization: start browser on first voice connection
+        if not await ensure_browser_initialized():
+            await safe_send_json({"type": "error", "error": "Failed to initialize browser"})
+            return
+        
+        # Track voice connection
+        voice_connection_id = f"voice_{id(websocket)}"
+        _active_connections.add(voice_connection_id)
+        _last_activity_time = time.time()
+        
         # Initialize voice integration if not already done
         if not _voice_integration:
             if not Config.validate_voice():
                 await safe_send_json({"type": "error", "error": "Voice configuration invalid"})
+                if voice_connection_id:
+                    _active_connections.discard(voice_connection_id)
                 return
             
             ws_url = await _browser_manager.websocket_url()
             if not ws_url:
                 await safe_send_json({"type": "error", "error": "Failed to get WebSocket URL"})
+                if voice_connection_id:
+                    _active_connections.discard(voice_connection_id)
                 return
             
             _voice_integration = BrowserUseIntegration(
@@ -300,6 +463,8 @@ async def websocket_voice(websocket: WebSocket):
             )
             if not await _voice_integration.initialize():
                 await safe_send_json({"type": "error", "error": "Failed to initialize voice integration"})
+                if voice_connection_id:
+                    _active_connections.discard(voice_connection_id)
                 return
         
         # Step callback to send step data (narration, screenshots) to frontend
@@ -373,8 +538,14 @@ async def websocket_voice(websocket: WebSocket):
                 await safe_send_json({"type": "error", "error": "Failed to initialize voice pipeline"})
                 return
             
+            # Set WebSocket sender for audio streaming
+            _voice_pipeline.set_websocket_sender(safe_send_json)
+            
             # Run pipeline in background (only once)
             pipeline_task = asyncio.create_task(_voice_pipeline.run())
+        else:
+            # Update WebSocket sender for this connection
+            _voice_pipeline.set_websocket_sender(safe_send_json)
         
         # Send ready message
         if not await safe_send_json({"type": "ready"}):
@@ -424,12 +595,33 @@ async def websocket_voice(websocket: WebSocket):
         if _voice_integration:
             _voice_integration.update_callbacks(step_callback=None)
         
+        # Remove connection tracking
+        if voice_connection_id:
+            _active_connections.discard(voice_connection_id)
+        _last_activity_time = time.time()
+        
         # Close websocket if still connected
         if is_connected() and not connection_closed:
             try:
                 await websocket.close()
             except Exception:
                 pass
+
+
+@app.post("/api/cleanup")
+async def cleanup_endpoint():
+    """Explicit cleanup endpoint called when frontend tab closes."""
+    global _active_connections, _last_activity_time
+    
+    logger.info("Cleanup endpoint called - clearing active connections")
+    _active_connections.clear()
+    _last_activity_time = 0.0
+    
+    # Trigger immediate cleanup (browser will close due to idle timeout check)
+    # Don't await to avoid blocking the response
+    asyncio.create_task(cleanup_browser())
+    
+    return {"status": "cleanup initiated"}
 
 
 @app.get("/health")
@@ -446,5 +638,7 @@ if __name__ == "__main__":
         format='%(levelname)-8s | %(message)s',
     )
     
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Cloud Run sets PORT environment variable, default to 8000 for local
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 

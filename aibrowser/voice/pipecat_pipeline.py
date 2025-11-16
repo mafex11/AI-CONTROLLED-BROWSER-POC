@@ -6,7 +6,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from pipecat.frames.frames import TextFrame, StartFrame, TranscriptionFrame, InterimTranscriptionFrame, BotStartedSpeakingFrame, BotStoppedSpeakingFrame
+from pipecat.frames.frames import TextFrame, StartFrame, TranscriptionFrame, InterimTranscriptionFrame, BotStartedSpeakingFrame, BotStoppedSpeakingFrame, TTSAudioRawFrame
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -14,6 +14,7 @@ from pipecat.pipeline.task import PipelineTask
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.services.deepgram.stt import DeepgramSTTService
+import base64
 
 try:
 	from deepgram import LiveOptions
@@ -259,6 +260,49 @@ class SpeechCompletionTracker(FrameProcessor):
 		await self.push_frame(frame, direction)
 
 
+class AudioStreamProcessor(FrameProcessor):
+	"""Processor that streams TTS audio to frontend via WebSocket."""
+
+	def __init__(self, websocket_sender=None) -> None:
+		super().__init__()
+		self._websocket_sender = websocket_sender
+
+	def set_websocket_sender(self, sender) -> None:
+		"""Set the WebSocket sender function."""
+		self._websocket_sender = sender
+
+	async def process_frame(self, frame, direction: FrameDirection) -> None:
+		"""Process frames and stream TTS audio to frontend."""
+		await super().process_frame(frame, direction)
+		
+		# Intercept TTS audio frames and stream to frontend
+		if isinstance(frame, TTSAudioRawFrame) and self._websocket_sender:
+			try:
+				# Convert audio bytes to base64
+				audio_base64 = base64.b64encode(frame.audio).decode('utf-8')
+				
+				# Send to frontend via WebSocket
+				if asyncio.iscoroutinefunction(self._websocket_sender):
+					await self._websocket_sender({
+						"type": "audio_chunk",
+						"audio": audio_base64,
+						"sample_rate": frame.sample_rate,
+						"num_channels": frame.num_channels,
+					})
+				else:
+					self._websocket_sender({
+						"type": "audio_chunk",
+						"audio": audio_base64,
+						"sample_rate": frame.sample_rate,
+						"num_channels": frame.num_channels,
+					})
+			except Exception as e:
+				logger.warning('Error streaming audio to frontend: %s', e)
+		
+		# Always pass frames through to the next processor
+		await self.push_frame(frame, direction)
+
+
 class AgentToTTSProcessor(FrameProcessor):
 	"""Takes text from agent and sends it to TTS."""
 
@@ -322,6 +366,7 @@ class VoicePipeline:
 		self._agent_to_tts: Optional[AgentToTTSProcessor] = None
 		self._speech_tracker: Optional[SpeechCompletionTracker] = None
 		self._transport: Optional[LocalAudioTransport] = None
+		self._audio_stream_processor: Optional[AudioStreamProcessor] = None
 
 	async def initialize(self) -> bool:
 		"""Initialize the pipeline components."""
@@ -336,7 +381,7 @@ class VoicePipeline:
 				
 				transport_params = LocalAudioTransportParams(
 					audio_in_enabled=True,
-					audio_out_enabled=True,
+					audio_out_enabled=False,  # Disable local audio output - stream to frontend instead
 					vad_analyzer=vad_analyzer,
 				)
 				transport = LocalAudioTransport(transport_params)
@@ -425,6 +470,7 @@ class VoicePipeline:
 			text_to_agent = TextToAgentProcessor(self.agent_bridge)
 			self._agent_to_tts = AgentToTTSProcessor()
 			self._speech_tracker = SpeechCompletionTracker()
+			self._audio_stream_processor = AudioStreamProcessor()
 			
 			self.agent_bridge.set_tts_processor(self._agent_to_tts)
 			self.agent_bridge.set_speech_tracker(self._speech_tracker)
@@ -437,8 +483,9 @@ class VoicePipeline:
 					text_to_agent,
 					self._agent_to_tts,
 					tts_service,
+					self._audio_stream_processor,  # Stream audio to frontend
 					self._speech_tracker,
-					transport.output(),
+					transport.output(),  # Keep local output disabled or remove it
 				]
 			)
 			
@@ -477,6 +524,11 @@ class VoicePipeline:
 		except Exception as e:
 			logger.error('Error running pipeline: %s', e, exc_info=True)
 			raise
+
+	def set_websocket_sender(self, sender) -> None:
+		"""Set the WebSocket sender for audio streaming."""
+		if self._audio_stream_processor:
+			self._audio_stream_processor.set_websocket_sender(sender)
 
 	async def stop(self) -> None:
 		"""Stop the pipeline."""

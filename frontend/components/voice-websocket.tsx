@@ -16,10 +16,11 @@ interface VoiceWebSocketProps {
   onAgentResponse?: (text: string) => void;
   onStep?: (stepData: StepData) => void;
   onError?: (error: string) => void;
+  onAudioChunk?: (audio: string, sampleRate: number, numChannels: number) => void;
 }
 
 export function useVoiceWebSocket(props: VoiceWebSocketProps) {
-  const { isEnabled, onUserSpeech, onAgentResponse, onStep, onError } = props;
+  const { isEnabled, onUserSpeech, onAgentResponse, onStep, onError, onAudioChunk } = props;
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [reconnectTrigger, setReconnectTrigger] = useState(0);
@@ -29,10 +30,10 @@ export function useVoiceWebSocket(props: VoiceWebSocketProps) {
   const intentionallyDisconnectedRef = useRef(false);
   
   // Store callbacks in refs to avoid dependency issues
-  const callbacksRef = useRef({ onUserSpeech, onAgentResponse, onStep, onError });
+  const callbacksRef = useRef({ onUserSpeech, onAgentResponse, onStep, onError, onAudioChunk });
   useEffect(() => {
-    callbacksRef.current = { onUserSpeech, onAgentResponse, onStep, onError };
-  }, [onUserSpeech, onAgentResponse, onStep, onError]);
+    callbacksRef.current = { onUserSpeech, onAgentResponse, onStep, onError, onAudioChunk };
+  }, [onUserSpeech, onAgentResponse, onStep, onError, onAudioChunk]);
 
   useEffect(() => {
     if (!isEnabled) {
@@ -106,6 +107,8 @@ export function useVoiceWebSocket(props: VoiceWebSocketProps) {
             });
           } else if (data.type === "error" && callbacks.onError) {
             callbacks.onError(data.error);
+          } else if (data.type === "audio_chunk" && callbacks.onAudioChunk) {
+            callbacks.onAudioChunk(data.audio, data.sample_rate, data.num_channels);
           }
         } catch (e) {
           console.error("Failed to parse WebSocket message:", e);

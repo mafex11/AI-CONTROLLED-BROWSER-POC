@@ -9,7 +9,9 @@ from typing import Any, Dict, Optional
 
 from browser_use.browser.profile import BrowserProfile
 from browser_use.browser.session import BrowserSession
+from browser_use.llm.anthropic.chat import ChatAnthropic
 from browser_use.llm.google.chat import ChatGoogle
+from browser_use.llm.openai.chat import ChatOpenAI
 from browser_use.tools.service import Tools
 
 from .browser_controller import BrowserController
@@ -97,6 +99,16 @@ class BrowserUseIntegration:
 			observation_builder = ObservationPromptBuilder(search_engine=self.default_search_engine)
 			answer_builder = AnswerPromptBuilder()
 
+			# Calculate max_missing_action_retries based on provider
+			max_output_tokens = (
+				Config.GEMINI_MAX_OUTPUT_TOKENS
+				if Config.LLM_PROVIDER == 'gemini'
+				else Config.CLAUDE_MAX_TOKENS
+				if Config.LLM_PROVIDER == 'claude'
+				else Config.OPENAI_MAX_TOKENS
+			)
+			max_missing_action_retries = max_output_tokens // 400 if max_output_tokens else 5
+
 			agent = DirectBrowserAgent(
 				controller=controller,
 				llm=llm,
@@ -106,7 +118,7 @@ class BrowserUseIntegration:
 				config=AgentRunConfig(
 					max_steps=50,
 					search_engine=self.default_search_engine,
-					max_missing_action_retries=Config.GEMINI_MAX_OUTPUT_TOKENS // 400 if Config.GEMINI_MAX_OUTPUT_TOKENS else 5,
+					max_missing_action_retries=max_missing_action_retries,
 				),
 				narration_callback=self.narration_callback,
 				step_callback=self.step_callback,
@@ -176,18 +188,44 @@ class BrowserUseIntegration:
 		self._initialized = False
 
 	def _build_llm(self):
-		if Config.LLM_PROVIDER != 'gemini':
-			raise RuntimeError('Only Gemini provider is supported in this build.')
-		return ChatGoogle(
-			model=Config.GEMINI_MODEL,
-			api_key=Config.GEMINI_API_KEY,
-			temperature=Config.GEMINI_TEMPERATURE,
-			max_output_tokens=Config.GEMINI_MAX_OUTPUT_TOKENS,
-			top_p=Config.GEMINI_TOP_P,
-			max_retries=5,
-			retryable_status_codes=[403, 503, 429],
-			retry_delay=2.0,
-		)
+		if Config.LLM_PROVIDER == 'gemini':
+			return ChatGoogle(
+				model=Config.GEMINI_MODEL,
+				api_key=Config.GEMINI_API_KEY,
+				temperature=Config.GEMINI_TEMPERATURE,
+				max_output_tokens=Config.GEMINI_MAX_OUTPUT_TOKENS,
+				top_p=Config.GEMINI_TOP_P,
+				max_retries=5,
+				retryable_status_codes=[403, 503, 429],
+				retry_delay=2.0,
+			)
+		elif Config.LLM_PROVIDER == 'claude':
+			from httpx import Timeout
+			return ChatAnthropic(
+				model=Config.CLAUDE_MODEL,
+				api_key=Config.CLAUDE_API_KEY,
+				temperature=Config.CLAUDE_TEMPERATURE,
+				max_tokens=Config.CLAUDE_MAX_TOKENS,
+				top_p=Config.CLAUDE_TOP_P,
+				timeout=Timeout(Config.CLAUDE_TIMEOUT, connect=10.0),  # Set timeout for faster failures
+				max_retries=Config.CLAUDE_MAX_RETRIES,  # Reduced retries for faster error handling
+			)
+		elif Config.LLM_PROVIDER == 'openai':
+			# Build kwargs - frequency_penalty should always be passed (default 0.3)
+			# because reasoning models try to delete it from model_params
+			openai_kwargs = {
+				'model': Config.OPENAI_MODEL,
+				'api_key': Config.OPENAI_API_KEY,
+				'temperature': Config.OPENAI_TEMPERATURE,
+				'max_completion_tokens': Config.OPENAI_MAX_TOKENS,
+				'frequency_penalty': Config.OPENAI_FREQUENCY_PENALTY,  # Always pass (default 0.3)
+				'max_retries': 5,
+			}
+			if Config.OPENAI_TOP_P is not None:
+				openai_kwargs['top_p'] = Config.OPENAI_TOP_P
+			return ChatOpenAI(**openai_kwargs)
+		else:
+			raise RuntimeError(f'Unsupported LLM_PROVIDER: {Config.LLM_PROVIDER}. Supported providers are "gemini", "claude", and "openai".')
 
 	async def _build_browser_session(self) -> BrowserSession:
 		if not self.cdp_url:

@@ -41,7 +41,7 @@ class Config:
 	"""Centralized configuration for LLM and browser settings."""
 
 	LLM_PROVIDER: str = os.getenv('LLM_PROVIDER', 'gemini').strip().lower() or 'gemini'
-	if LLM_PROVIDER not in {'gemini', 'none'}:
+	if LLM_PROVIDER not in {'gemini', 'claude', 'openai', 'none'}:
 		logger.warning("Unsupported LLM_PROVIDER '%s', falling back to 'gemini'", LLM_PROVIDER)
 		LLM_PROVIDER = 'gemini'
 
@@ -60,6 +60,41 @@ class Config:
 
 	_GEMINI_TOP_K, used_default_top_k = _parse_int('GEMINI_TOP_K', 0)
 	GEMINI_TOP_K: Optional[int] = None if used_default_top_k else _GEMINI_TOP_K
+
+	CLAUDE_API_KEY: str = os.getenv('ANTHROPIC_API_KEY', '') or os.getenv('CLAUDE_API_KEY', '')
+	CLAUDE_MODEL: str = os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-1')  # Valid models: claude-sonnet-4-0, claude-3-5-sonnet-20241022, claude-3-5-sonnet-latest
+
+	# Robust parsing with sane defaults so misconfigured env vars do not crash startup.
+	_CLAUDE_TEMPERATURE, _ = _parse_float('CLAUDE_TEMPERATURE', 0.3)
+	CLAUDE_TEMPERATURE: float = _CLAUDE_TEMPERATURE
+
+	_CLAUDE_MAX_TOKENS, _ = _parse_int('CLAUDE_MAX_TOKENS', 4096)  # Reduced from 8192 for faster responses
+	CLAUDE_MAX_TOKENS: int = _CLAUDE_MAX_TOKENS
+
+	_CLAUDE_TOP_P, used_default_claude_top_p = _parse_float('CLAUDE_TOP_P', 0.0)
+	CLAUDE_TOP_P: Optional[float] = None if used_default_claude_top_p else _CLAUDE_TOP_P
+
+	_CLAUDE_TIMEOUT, _ = _parse_float('CLAUDE_TIMEOUT', 60.0)  # Timeout in seconds
+	CLAUDE_TIMEOUT: float = _CLAUDE_TIMEOUT
+
+	_CLAUDE_MAX_RETRIES, _ = _parse_int('CLAUDE_MAX_RETRIES', 2)  # Reduced from 5 for faster failure recovery
+	CLAUDE_MAX_RETRIES: int = _CLAUDE_MAX_RETRIES
+
+	OPENAI_API_KEY: str = os.getenv('OPENAI_API_KEY', '')
+	OPENAI_MODEL: str = os.getenv('OPENAI_MODEL', 'gpt-5-nano')  # Valid models: gpt-4o, gpt-4-turbo, gpt-4o-mini, o1-preview, o3-mini
+
+	# Robust parsing with sane defaults so misconfigured env vars do not crash startup.
+	_OPENAI_TEMPERATURE, _ = _parse_float('OPENAI_TEMPERATURE', 0.2)
+	OPENAI_TEMPERATURE: float = _OPENAI_TEMPERATURE
+
+	_OPENAI_MAX_TOKENS, _ = _parse_int('OPENAI_MAX_TOKENS', 4096)
+	OPENAI_MAX_TOKENS: int = _OPENAI_MAX_TOKENS
+
+	_OPENAI_TOP_P, used_default_openai_top_p = _parse_float('OPENAI_TOP_P', 0.0)
+	OPENAI_TOP_P: Optional[float] = None if used_default_openai_top_p else _OPENAI_TOP_P
+
+	_OPENAI_FREQUENCY_PENALTY, _ = _parse_float('OPENAI_FREQUENCY_PENALTY', 0.3)
+	OPENAI_FREQUENCY_PENALTY: float = _OPENAI_FREQUENCY_PENALTY  # Default 0.3 (ChatOpenAI default)
 
 	DEFAULT_SEARCH_ENGINE: str = os.getenv('DEFAULT_SEARCH_ENGINE', 'google').strip().lower() or 'google'
 
@@ -97,6 +132,12 @@ class Config:
 		if cls.LLM_PROVIDER == 'gemini' and not cls.GEMINI_API_KEY:
 			logger.error('Missing GEMINI_API_KEY. Set it in your environment.')
 			return False
+		if cls.LLM_PROVIDER == 'claude' and not cls.CLAUDE_API_KEY:
+			logger.error('Missing ANTHROPIC_API_KEY or CLAUDE_API_KEY. Set it in your environment.')
+			return False
+		if cls.LLM_PROVIDER == 'openai' and not cls.OPENAI_API_KEY:
+			logger.error('Missing OPENAI_API_KEY. Set it in your environment.')
+			return False
 		return True
 
 	@classmethod
@@ -131,6 +172,12 @@ class Config:
 		if cls.LLM_PROVIDER == 'gemini':
 			print(f'  Gemini Model: {cls.GEMINI_MODEL}')
 			print(f'  Gemini API Key: {"set" if bool(cls.GEMINI_API_KEY) else "missing"}')
+		elif cls.LLM_PROVIDER == 'claude':
+			print(f'  Claude Model: {cls.CLAUDE_MODEL}')
+			print(f'  Claude API Key: {"set" if bool(cls.CLAUDE_API_KEY) else "missing"}')
+		elif cls.LLM_PROVIDER == 'openai':
+			print(f'  OpenAI Model: {cls.OPENAI_MODEL}')
+			print(f'  OpenAI API Key: {"set" if bool(cls.OPENAI_API_KEY) else "missing"}')
 		print(f'  Default Search Engine: {cls.DEFAULT_SEARCH_ENGINE}')
 		print(
 			'  System Prompt: '

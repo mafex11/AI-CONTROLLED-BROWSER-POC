@@ -66,6 +66,7 @@ class DirectBrowserAgent:
 		self._conversation: List[BaseMessage] = []
 		self._context_log: List[str] = []
 		self._max_conversation_history: int = 50
+		self._previous_step_element_error: bool = False  # Track if previous step had element error
 		self._last_highlight_screenshot_base64: str | None = None  # Store last highlight screenshot for step callback
 
 	def _check_step_timeout(self, step: int, step_start_time: float) -> bool:
@@ -159,6 +160,12 @@ class DirectBrowserAgent:
 				
 				tab_summary = self._format_tab_summary(state)
 				context_lines = '\n'.join(self._context_log[-6:])
+				
+				# If previous step had element error, add explicit retry instruction
+				if self._previous_step_element_error and step > 1:
+					retry_instruction = '\n\nIMPORTANT: The previous action failed because an element was not found (page may have changed). The DOM has been refreshed with current element indices. You need to RETRY the failed action using the current page state. Do NOT claim the action succeeded - it failed and needs to be retried.'
+					context_lines = retry_instruction + '\n\nRecent context:\n' + context_lines
+					self._previous_step_element_error = False  # Reset after using
 				
 				if is_continuation and step == 1:
 					# For continuation, provide context that user has responded
@@ -455,22 +462,35 @@ class DirectBrowserAgent:
 			# Check if this is an element error - if so, refresh DOM immediately before continuing
 			element_changed = self._is_element_error(result_str)
 			if element_changed:
-				logger.warning('Element error detected, immediately refreshing DOM to get current element indices...')
+				logger.warning('Element error detected at step %d, immediately refreshing DOM to get current element indices...', step)
 				self._context_log.append('Element error detected - page structure changed, refreshing DOM immediately')
 				self._context_log = self._context_log[-20:]
+				
+				# Set flag so next step knows to retry
+				self._previous_step_element_error = True
 				
 				# Immediately refresh state with screenshot
 				await asyncio.sleep(0.2)  # Brief wait for page to stabilize
 				try:
+					logger.info('Refreshing browser state after element error (step %d)...', step)
 					state = await asyncio.wait_for(
 						self.controller.refresh_state(include_dom=True, include_screenshot=True),
 						timeout=30.0
 					)
-					logger.debug('DOM refreshed after element error (URL: %s)', state.url if state else 'unknown')
+					if state:
+						logger.info('DOM refreshed successfully after element error (step %d, URL: %s)', step, state.url if state else 'unknown')
+					else:
+						logger.warning('DOM refresh returned None state after element error (step %d)', step)
 					await asyncio.sleep(0.1)  # Small delay after refresh
-				except Exception as refresh_error:  # noqa: BLE001
-					logger.warning('Failed to refresh state after element error: %s', refresh_error)
+				except asyncio.TimeoutError:
+					logger.error('DOM refresh timed out after element error at step %d', step)
 					state = self.controller.last_state or state
+				except Exception as refresh_error:  # noqa: BLE001
+					logger.error('Failed to refresh state after element error at step %d: %s', step, refresh_error, exc_info=True)
+					state = self.controller.last_state or state
+			else:
+				# Reset flag if no element error
+				self._previous_step_element_error = False
 			
 			self._context_log.append(result_str)
 			self._context_log = self._context_log[-20:]

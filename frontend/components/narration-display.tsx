@@ -20,7 +20,7 @@ export function NarrationDisplay({ step, narration }: NarrationDisplayProps) {
         <CardHeader className="pb-3">
           <CardTitle className="text-lg flex items-center gap-2">
             <MessageSquare className="h-4 w-4" />
-            Step {step} - Agent Narration
+            Agent Response
           </CardTitle>
         </CardHeader>
         <CardContent>
