@@ -395,7 +395,7 @@ class VoicePipeline:
 				
 				transport_params = LocalAudioTransportParams(
 					audio_in_enabled=True,
-					audio_out_enabled=True,  # Enable local audio output for voice mode
+					audio_out_enabled=False,  # Disable local audio output - audio is streamed to frontend
 					vad_analyzer=vad_analyzer,
 				)
 				transport = LocalAudioTransport(transport_params)
@@ -497,9 +497,9 @@ class VoicePipeline:
 					text_to_agent,
 					self._agent_to_tts,
 					tts_service,
-					self._audio_stream_processor,  # Stream audio to frontend (optional)
+					self._audio_stream_processor,  # Stream audio to frontend via WebSocket
 					self._speech_tracker,
-					transport.output(),  # Local audio output for voice mode
+					transport.output(),  # Output sink (audio disabled, only for pipeline completion)
 				]
 			)
 			

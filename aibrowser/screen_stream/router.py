@@ -47,20 +47,25 @@ class IceCandidateRequest(BaseModel):
 
 
 # Get Coturn configuration from environment
-COTURN_HOST = os.getenv("COTURN_HOST", "34.93.0.226")
-COTURN_PORT = os.getenv("COTURN_PORT", "3478")
-COTURN_USERNAME = os.getenv("COTURN_USERNAME", "mafex")
-COTURN_PASSWORD = os.getenv("COTURN_PASSWORD", "mafex")
+COTURN_HOST = os.getenv("COTURN_HOST")
+COTURN_PORT = os.getenv("COTURN_PORT")
+COTURN_USERNAME = os.getenv("COTURN_USERNAME")
+COTURN_PASSWORD = os.getenv("COTURN_PASSWORD")
 
 # Configure ICE servers
 ice_servers = [
     {"urls": "stun:stun.l.google.com:19302"},
-    {
+]
+
+# Only add TURN server if configuration is provided
+if COTURN_HOST and COTURN_PORT and COTURN_USERNAME and COTURN_PASSWORD:
+    ice_servers.append({
         "urls": f"turn:{COTURN_HOST}:{COTURN_PORT}",
         "username": COTURN_USERNAME,
         "credential": COTURN_PASSWORD,
-    },
-]
+    })
+else:
+    logger.info("TURN server not configured, using STUN only (may not work behind strict NAT/firewalls)")
 
 # Global screen stream manager
 manager = ScreenStreamManager(ice_servers=ice_servers)
@@ -86,17 +91,20 @@ async def handle_offer(request: OfferRequest):
         # If not set, try to get from shared browser pool
         if not cdp_url:
             if _browser_pool is None:
-                raise RuntimeError("Browser pool not initialized. Please start voice session first.")
+                raise RuntimeError("Browser pool not initialized. Please ensure browser is running.")
             
-            # Get or create browser integration to get CDP URL
-            integration = await _browser_pool.ensure_ready()
-            
-            # Try to get from browser manager
-            if hasattr(_browser_pool, "_browser_manager") and _browser_pool._browser_manager:
-                cdp_url = await _browser_pool._browser_manager.websocket_url()
+            # Check if _browser_pool is a CDPBrowserManager (from api_server)
+            if hasattr(_browser_pool, "websocket_url"):
+                # Direct CDPBrowserManager from api_server
+                cdp_url = await _browser_pool.websocket_url()
+            elif hasattr(_browser_pool, "ensure_ready"):
+                # BrowserSessionPool from webrtc app
+                integration = await _browser_pool.ensure_ready()
+                if hasattr(_browser_pool, "_browser_manager") and _browser_pool._browser_manager:
+                    cdp_url = await _browser_pool._browser_manager.websocket_url()
         
         if not cdp_url:
-            raise RuntimeError("CDP WebSocket URL not available. Please start voice session first.")
+            raise RuntimeError("CDP WebSocket URL not available. Please ensure browser is running.")
         
         logger.info("Using CDP URL: %s", cdp_url)
         

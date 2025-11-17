@@ -4,7 +4,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     
-    const response = await fetch("http://localhost:8100/api/screen-stream/ice", {
+    const response = await fetch("http://localhost:8000/api/screen-stream/ice", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

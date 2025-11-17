@@ -35,6 +35,7 @@ class AgentBridge:
 		self._tts_queue: asyncio.Queue = asyncio.Queue()
 		self._tts_processing = False
 		self._tts_task: Optional[asyncio.Task] = None
+		self._audio_playback_complete_future: Optional[asyncio.Future] = None
 
 	async def process_user_text(self, text: str) -> None:
 		"""Process user speech transcript and run agent."""
@@ -204,21 +205,16 @@ class AgentBridge:
 						if not (message.startswith('{') or message.startswith('[') or 'index=' in message.lower()):
 							logger.debug(f'Step {step} (before): {message}')
 							_last_tts_message = message
-							# Send TTS and wait for it to complete before proceeding
+							
+							# Create a future for audio playback completion
+							self._audio_playback_complete_future = asyncio.get_event_loop().create_future()
+							
+							# Send TTS (audio will stream to frontend and play there)
 							await self._send_to_tts(message)
 							
-							# Wait for TTS to be sent to pipeline (queue processing)
-							# Give a small delay to ensure the message is picked up from queue
-							await asyncio.sleep(0.1)
-							
-							# Wait for speech to complete before allowing tool execution
-							if self._speech_tracker:
-								try:
-									logger.debug(f'Waiting for speech completion before step {step} tool execution...')
-									await self._speech_tracker.wait_for_speech_completion(timeout=30.0)
-									logger.debug(f'Speech completed, proceeding with step {step} tool execution')
-								except Exception as e:
-									logger.warning(f'Error waiting for speech completion: {e}, proceeding anyway')
+							# Wait for frontend to signal audio playback completion
+							logger.debug(f'Waiting for audio playback to complete before executing tool...')
+							await self.wait_for_audio_playback_complete(timeout=30.0)
 					
 					return
 				elif phase == 'after':
@@ -394,4 +390,21 @@ class AgentBridge:
 
 	def is_processing(self) -> bool:
 		return self._processing
+	
+	async def wait_for_audio_playback_complete(self, timeout: float = 30.0) -> None:
+		"""Wait for frontend to signal audio playback completion."""
+		if self._audio_playback_complete_future and not self._audio_playback_complete_future.done():
+			try:
+				await asyncio.wait_for(self._audio_playback_complete_future, timeout=timeout)
+				logger.debug('Audio playback completed')
+			except asyncio.TimeoutError:
+				logger.warning('Timeout waiting for audio playback completion, proceeding anyway')
+			except Exception as e:
+				logger.error('Error waiting for audio playback completion: %s', e)
+	
+	def signal_audio_playback_complete(self) -> None:
+		"""Signal that frontend has completed audio playback."""
+		if self._audio_playback_complete_future and not self._audio_playback_complete_future.done():
+			self._audio_playback_complete_future.set_result(None)
+			logger.debug('Audio playback completion signal received')
 

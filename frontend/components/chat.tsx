@@ -62,21 +62,6 @@ export function Chat({ messages }: ChatProps) {
                   )}
                 </CardContent>
               </Card>
-              {message.screenshot && message.type === "agent" && (
-                <Card className="w-full">
-                  <CardContent className="p-2">
-                    <img
-                      src={
-                        message.screenshot.startsWith("data:image")
-                          ? message.screenshot
-                          : `data:image/png;base64,${message.screenshot}`
-                      }
-                      alt="Agent screenshot"
-                      className="w-full h-auto rounded-md max-h-96 object-contain"
-                    />
-                  </CardContent>
-                </Card>
-              )}
             </div>
           </motion.div>
         ))}

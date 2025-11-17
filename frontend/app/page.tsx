@@ -11,10 +11,12 @@ import { NarrationDisplay } from "@/components/narration-display";
 import { ScreenshotDisplay } from "@/components/screenshot-display";
 import { useVoiceWebSocket } from "@/components/voice-websocket";
 import { Chat, ChatMessage } from "@/components/chat";
+import { BrowserScreenStream } from "@/components/browser-screen-stream";
 
 interface StepData {
   step: number;
   narration: string;
+  tool?: string;
   screenshot?: string;
   timestamp: Date;
 }
@@ -39,6 +41,7 @@ export default function Home() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [processedSteps, setProcessedSteps] = useState<Set<string>>(new Set());
   const [isProviderDropdownOpen, setIsProviderDropdownOpen] = useState(false);
+  const [hasNavigated, setHasNavigated] = useState(false);
   const providerDropdownRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
@@ -48,6 +51,7 @@ export default function Home() {
   const audioQueueRef = useRef<Array<{ audioBase64: string; sampleRate: number; numChannels: number }>>([]);
   const isProcessingAudioQueueRef = useRef(false);
   const nextPlayTimeRef = useRef<number | null>(null);
+  const sendVoiceMessageRef = useRef<((message: Record<string, unknown>) => void) | null>(null);
 
   // Initialize AudioContext for voice mode
   useEffect(() => {
@@ -160,6 +164,11 @@ export default function Home() {
             // Reset next play time when all audio is done
             if (audioQueueRef.current.length === 0) {
               nextPlayTimeRef.current = null;
+              // Signal backend that audio playback is complete
+              if (sendVoiceMessageRef.current) {
+                console.log('Audio playback complete, signaling backend');
+                sendVoiceMessageRef.current({ type: 'audio_playback_complete' });
+              }
             }
           }
         };
@@ -195,7 +204,7 @@ export default function Home() {
     processAudioQueue();
   }, [processAudioQueue]);
 
-  const { isConnected: isVoiceConnected, isConnecting: isVoiceConnecting, disconnect: disconnectVoice } = useVoiceWebSocket({
+  const { isConnected: isVoiceConnected, isConnecting: isVoiceConnecting, sendMessage: sendVoiceMessage, disconnect: disconnectVoice } = useVoiceWebSocket({
     isEnabled: isVoiceMode,
     onUserSpeech: (text) => {
       if (!text.trim()) return;
@@ -212,6 +221,7 @@ export default function Home() {
       
       // Reset processed steps for new query
       setProcessedSteps(new Set());
+      // Don't reset hasNavigated - keep stream alive once started
       
       // Add user message to chat and thinking message
       setChatMessages((prev) => {
@@ -298,6 +308,11 @@ export default function Home() {
       });
     },
     onStep: (stepData) => {
+      // Check if this step involves navigation
+      if (stepData.tool && stepData.tool.toLowerCase().includes('navigate')) {
+        setHasNavigated(true);
+      }
+      
       // Add step with narration and screenshot
       setSteps((prev) => {
         // Check if step already exists (update it) or add new one
@@ -331,59 +346,32 @@ export default function Home() {
       // Always add agent response to chat if there's narration
       // This ensures all responses from voice mode are displayed
       if (stepData.narration && stepData.narration.trim()) {
-        // Use a stable unique key for this step/narration combo
-        const uniqueKey = `step-${stepData.step}-narration`;
-        
         setChatMessages((msgPrev) => {
           // Remove thinking message if it exists
           const filtered = msgPrev.filter((msg) => !(msg.isLoading && msg.type === "agent"));
           
-          // Check if we already have a message for this step
-          // Use a more reliable check: look for messages with the step number in the ID
-          const existingMessageIndex = filtered.findIndex(
-            (msg) => msg.type === "agent" && msg.id.includes(`-${stepData.step}-`)
+          // Check if we already have this exact narration recently (within last 2 messages)
+          // This prevents duplicate messages from the same step update
+          const lastTwoMessages = filtered.slice(-2);
+          const isDuplicate = lastTwoMessages.some(
+            (msg) => msg.type === "agent" && msg.content === stepData.narration
           );
           
-          if (existingMessageIndex >= 0) {
-            // Update existing message with new content and screenshot
-            const updated = [...filtered];
-            const existingMsg = updated[existingMessageIndex];
-            
-            // Only update if content changed or screenshot is new
-            if (existingMsg.content !== stepData.narration || 
-                (stepData.screenshot && existingMsg.screenshot !== stepData.screenshot)) {
-              updated[existingMessageIndex] = {
-                ...existingMsg,
-                content: stepData.narration,
-                screenshot: stepData.screenshot || existingMsg.screenshot,
-                timestamp: new Date(),
-              };
-            }
-            
-            return updated;
+          if (isDuplicate) {
+            return filtered; // Don't add duplicate
           }
           
-          // Add new message only if we don't have one for this step
+          // Always add new message (don't update existing steps)
+          // This ensures each agent response is preserved, even for step 1 after interruption
           return [
             ...filtered,
             {
               id: `agent-step-${stepData.step}-${Date.now()}`,
               type: "agent",
               content: stepData.narration,
-              screenshot: stepData.screenshot,
               timestamp: new Date(),
             },
           ];
-        });
-        
-        // Track processed steps separately to prevent duplicate processing
-        setProcessedSteps((prev) => {
-          if (prev.has(uniqueKey)) {
-            return prev; // Already processed this step
-          }
-          const newSet = new Set(prev);
-          newSet.add(uniqueKey);
-          return newSet;
         });
       }
     },
@@ -400,11 +388,17 @@ export default function Home() {
     },
   });
 
+  // Update sendVoiceMessage ref
+  useEffect(() => {
+    sendVoiceMessageRef.current = sendVoiceMessage;
+  }, [sendVoiceMessage]);
+  
   // Clear steps when voice mode is toggled
   useEffect(() => {
     if (isVoiceMode && isVoiceConnected) {
       setSteps([]);
       setCurrentSlideIndex(0);
+      // Don't reset hasNavigated - keep stream alive when switching modes
     }
   }, [isVoiceMode, isVoiceConnected]);
 
@@ -428,21 +422,32 @@ export default function Home() {
   // Cleanup browser when tab closes
   useEffect(() => {
     const handleBeforeUnload = () => {
-      // Send cleanup signal to backend using sendBeacon (more reliable for unload)
+      // Stop voice pipeline if active and reset browser to blank page when frontend closes
+      const blob = new Blob([JSON.stringify({})], { type: "application/json" });
+      
       try {
-        // sendBeacon only accepts strings/Blob/FormData, not JSON directly
-        const blob = new Blob([JSON.stringify({})], { type: "application/json" });
-        navigator.sendBeacon("/api/cleanup", blob);
+        // Stop voice pipeline if voice mode is active
+        if (isVoiceMode) {
+          navigator.sendBeacon("/api/stop-voice", blob);
+        }
+        // Reset browser to blank page
+        navigator.sendBeacon("/api/reset-browser", blob);
       } catch (e) {
         // Fallback if sendBeacon fails
-        fetch("/api/cleanup", {
+        if (isVoiceMode) {
+          fetch("/api/stop-voice", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+            keepalive: true,
+          }).catch(() => {});
+        }
+        fetch("/api/reset-browser", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({}),
           keepalive: true,
-        }).catch(() => {
-          // Ignore errors during cleanup
-        });
+        }).catch(() => {});
       }
     };
 
@@ -450,17 +455,23 @@ export default function Home() {
     
     return () => {
       window.removeEventListener("beforeunload", handleBeforeUnload);
-      // Also send cleanup on component unmount
-      fetch("/api/cleanup", {
+      // Also stop voice and reset browser on component unmount
+      if (isVoiceMode) {
+        fetch("/api/stop-voice", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+          keepalive: true,
+        }).catch(() => {});
+      }
+      fetch("/api/reset-browser", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
-        keepalive: true, // Ensures request completes even if tab closes
-      }).catch(() => {
-        // Ignore errors during cleanup
-      });
+        keepalive: true,
+      }).catch(() => {});
     };
-  }, []);
+  }, [isVoiceMode]);
 
   const handleStopVoiceMode = () => {
     // Stop all audio
@@ -565,6 +576,7 @@ export default function Home() {
     setQuery("");
     // Reset processed steps for new query
     setProcessedSteps(new Set());
+    // Don't reset hasNavigated - keep stream alive once started
 
     // Add user query to chat and thinking message
     setChatMessages((prev) => [
@@ -643,6 +655,11 @@ export default function Home() {
                   return newSteps;
                 });
 
+                // Check if this step involves navigation
+                if (data.tool && data.tool.toLowerCase().includes('navigate')) {
+                  setHasNavigated(true);
+                }
+                
                 // Add agent response to chat if there's narration
                 if (data.narration) {
                   const stepKey = `${data.step}-${data.narration}`;
@@ -674,7 +691,6 @@ export default function Home() {
                           id: `agent-${data.step}-${Date.now()}`,
                           type: "agent",
                           content: data.narration,
-                          screenshot: data.screenshot,
                           timestamp: new Date(),
                         },
                       ];
@@ -708,32 +724,32 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-zinc-900 flex flex-col relative">
-      <div className={`max-w-6xl mx-auto w-full flex-1 flex flex-col ${isSubmitted || steps.length > 0 ? '' : 'justify-center'} px-4 md:px-8 pt-4 md:pt-8 pb-0`}>
+    <div className={`${hasNavigated ? 'h-[calc(100vh-4rem)] overflow-hidden' : 'min-h-[calc(100vh-4rem)]'} bg-zinc-900 flex flex-col relative`}>
+      <div className={`${hasNavigated ? 'max-w-full h-full' : 'max-w-6xl'} mx-auto w-full flex-1 flex flex-col ${isSubmitted || steps.length > 0 ? '' : 'justify-center'} ${hasNavigated ? 'px-0 lg:px-0' : 'px-4 md:px-8'} pt-4 md:pt-8 pb-0`}>
         {!isSubmitted && (
           <div className="flex flex-col items-center justify-center space-y-8 mb-8">
             <AnimatePresence>
               <motion.div
-                key="titles"
+                key="subtitle"
                 initial={{ opacity: 0, y: -20 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.4, ease: [0.4, 0, 0.2, 1] }}
                 className="text-center"
               >
-                <motion.h1 
-                  className="text-5xl md:text-6xl font-bold mb-4 bg-gradient-to-r from-foreground to-foreground/70 bg-clip-text text-transparent"
-                  initial={{ opacity: 0, scale: 0.95 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  transition={{ delay: 0.1 }}
-                >
-                  AI Browser
-                </motion.h1>
                 <motion.p 
-                  className="text-lg text-muted-foreground max-w-2xl mx-auto"
+                  className=" text-4xl lg:text-5xl font-bold bg-gradient-to-r from-foreground to-foreground/70 bg-clip-text text-transparent mx-auto "
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
-                  transition={{ delay: 0.2 }}
+                  transition={{ delay: 0.1 }}
+                >
+                  AI Voice Controlled Browser
+                </motion.p>
+                <motion.p 
+                  className="text-lg text-muted-foreground max-w-2xl mx-auto mt-4"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: 0.1 }}
                 >
                   Control your browser with natural language
                 </motion.p>
@@ -756,24 +772,24 @@ export default function Home() {
                 onSubmit={handleSubmit}
                 className="space-y-4"
               >
-                <Card className="border-2 bg-transparent backdrop-blur-sm rounded-full">
+                <Card className="border-0 bg-transparent rounded-full">
                   <CardContent className="p-4">
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 lg:gap-3">
                       {/* Provider Selector as Custom Dropdown */}
                       <div className="relative" ref={providerDropdownRef}>
                         <button
                           type="button"
                           onClick={() => setIsProviderDropdownOpen(!isProviderDropdownOpen)}
                           disabled={isLoading}
-                          className="h-12 px-8 rounded-full bg-zinc-900 border text-sm font-medium text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                          className="h-12 px-4 lg:px-8 rounded-full bg-zinc-900 border text-sm font-medium text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                          <span>
-                            {PROVIDER_INFO[provider].label}
-                            {provider === "gemini" && " (Fastest)"}
-                            {provider === "claude" && " (Best)"}
-                            {provider === "openai" && " (Good)"}
+                          <span className="lg:hidden font-bold text-base">
+                            {PROVIDER_INFO[provider].label.charAt(0)}
                           </span>
-                          <ChevronDown className={`h-4 w-4 transition-transform ${isProviderDropdownOpen ? "rotate-180" : ""}`} />
+                          <span className="hidden lg:inline">
+                            {PROVIDER_INFO[provider].label}
+                          </span>
+                          <ChevronDown className={`hidden lg:inline h-46 w-4 transition-transform ${isProviderDropdownOpen ? "rotate-180" : ""}`} />
                         </button>
                         <AnimatePresence>
                           {isProviderDropdownOpen && (
@@ -782,7 +798,7 @@ export default function Home() {
                               animate={{ opacity: 1, y: 0 }}
                               exit={{ opacity: 0, y: 10 }}
                               transition={{ duration: 0.2 }}
-                              className="absolute bottom-full left-0 mb-2 w-full min-w-[200px] bg-zinc-900 border rounded-xl shadow-lg z-50 overflow-hidden"
+                              className="absolute bottom-full left-0 mb-2 w-full min-w-[100px] bg-zinc-900 border rounded-xl shadow-lg z-50 overflow-hidden"
                             >
                               {Object.entries(PROVIDER_INFO).map(([key, info]) => (
                                 <button
@@ -800,9 +816,9 @@ export default function Home() {
                                   } disabled:opacity-50 disabled:cursor-not-allowed`}
                                 >
                                   {info.label}
-                                  {key === "gemini" && " (Fastest)"}
-                                  {key === "claude" && " (Best)"}
-                                  {key === "openai" && " (Good)"}
+                                  {key === "gemini"}
+                                  {key === "claude"}
+                                  {key === "openai"}
                                 </button>
                               ))}
                             </motion.div>
@@ -811,14 +827,22 @@ export default function Home() {
                       </div>
 
                       {/* Input */}
-                      <div className="flex-1 relative ml-4 rounded-full">
+                      <div className="flex-1 relative lg:ml-4 rounded-full">
                         <Input
                           type="text"
-                          placeholder="What would you like me to do in the browser?"
+                          placeholder={
+                            isVoiceMode 
+                              ? isVoiceConnecting 
+                                ? "Starting voice mode..." 
+                                : isVoiceConnected 
+                                  ? "Please talk..." 
+                                  : "Voice mode disconnected"
+                              : "Ask something..."
+                          }
                           value={query}
                           onChange={(e) => setQuery(e.target.value)}
-                          disabled={isLoading}
-                          className="h-12 text-base pr-12 border-2 focus-visible:ring-2 focus-visible:ring-primary/50 rounded-full"
+                          disabled={isLoading || isVoiceMode}
+                          className="h-12 text-sm lg:text-base pr-12 border-2 focus-visible:ring-2 focus-visible:ring-primary/50 rounded-full placeholder:text-xs lg:placeholder:text-sm"
                           onKeyDown={(e) => {
                             if (e.key === 'Enter' && !e.shiftKey && query.trim() && !isLoading) {
                               e.preventDefault();
@@ -858,53 +882,23 @@ export default function Home() {
                         <Button
                           type="button"
                           onClick={handleStop}
-                          className="h-12 px-6 shrink-0 rounded-full"
+                          className="h-12 px-3 shrink-0 rounded-full"
                           size="lg"
                         >
-                          <Square className="h-5 w-5 mr-2" />
-                          Stop
+                          <Square className="h-6 w-6" />
                         </Button>
                       ) : (
                         <Button
                           type="submit"
                           disabled={!query.trim() || isLoading}
-                          className="h-12 px-6 shrink-0 rounded-full"
+                          className="h-12 px-3 shrink-0 rounded-full"
                           size="lg"
                         >
-                          <Send className="h-5 w-5 mr-2" />
-                          Send
+                          <Send className="h-6 w-6" />
+                          
                         </Button>
                       )}
                     </div>
-                    {/* Voice Mode Status */}
-                    {isVoiceMode && (
-                      <motion.div
-                        initial={{ opacity: 0, height: 0 }}
-                        animate={{ opacity: 1, height: 'auto' }}
-                        exit={{ opacity: 0, height: 0 }}
-                        className="pt-2 border-t mt-4"
-                      >
-                        <div className="flex items-center gap-2 text-sm">
-                          <div className={`h-2 w-2 rounded-full ${
-                            isVoiceConnected ? 'bg-green-500 animate-pulse' : 
-                            isVoiceConnecting ? 'bg-yellow-500 animate-pulse' : 
-                            'bg-red-500'
-                          }`} />
-                          <span className="text-muted-foreground">
-                            {isVoiceConnecting ? "Connecting..." : isVoiceConnected ? "Voice mode active" : "Voice mode disconnected"}
-                          </span>
-                        </div>
-                        {voiceStatus && (
-                          <motion.p 
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            className="text-xs text-muted-foreground mt-1.5 pl-4"
-                          >
-                            {voiceStatus}
-                          </motion.p>
-                        )}
-                      </motion.div>
-                    )}
                   </CardContent>
                 </Card>
               </motion.form>
@@ -913,96 +907,179 @@ export default function Home() {
         )}
 
         {isSubmitted && (
-          <div className="flex-1 overflow-y-auto min-h-0 mb-4 flex flex-col">
-            {chatMessages.length > 0 ? (
-              <div className="flex-1 min-h-0">
-                <Chat messages={chatMessages} />
-              </div>
-            ) : steps.length > 0 ? (
-              <div className="flex-1 relative flex items-center justify-center">
-                <AnimatePresence mode="wait">
-                  {steps[currentSlideIndex] && (
-                    <motion.div
-                      key={currentSlideIndex}
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      exit={{ opacity: 0 }}
-                      transition={{ duration: 0.5 }}
-                      className="w-full space-y-4"
-                    >
-                      {steps[currentSlideIndex].narration && (
-                        <NarrationDisplay
-                          step={steps[currentSlideIndex].step}
-                          narration={steps[currentSlideIndex].narration}
-                        />
-                      )}
-                      {steps[currentSlideIndex].screenshot && (
-                        <ScreenshotDisplay
-                          step={steps[currentSlideIndex].step}
-                          screenshot={steps[currentSlideIndex].screenshot}
-                        />
-                      )}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-
-                {steps.length > 1 && (
-                  <>
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      className="absolute left-4 z-10 shadow-lg backdrop-blur-sm bg-background/80 hover:bg-background"
-                      onClick={() => setCurrentSlideIndex((prev) => Math.max(0, prev - 1))}
-                      disabled={currentSlideIndex === 0}
-                    >
-                      <ChevronLeft className="h-5 w-5" />
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      className="absolute right-4 z-10 shadow-lg backdrop-blur-sm bg-background/80 hover:bg-background"
-                      onClick={() => setCurrentSlideIndex((prev) => Math.min(steps.length - 1, prev + 1))}
-                      disabled={currentSlideIndex === steps.length - 1}
-                    >
-                      <ChevronRight className="h-5 w-5" />
-                    </Button>
-                  </>
-                )}
-
-                {steps.length > 1 && (
-                  <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 flex gap-2 z-10 bg-background/80 backdrop-blur-sm px-4 py-2 rounded-full shadow-lg border">
-                    {steps.map((_, index) => (
-                      <button
-                        key={index}
-                        onClick={() => setCurrentSlideIndex(index)}
-                        className={`h-2 rounded-full transition-all duration-300 ${
-                          index === currentSlideIndex
-                            ? "w-8 bg-primary shadow-md"
-                            : "w-2 bg-muted-foreground/30 hover:bg-muted-foreground/50"
-                        }`}
-                        aria-label={`Go to slide ${index + 1}`}
-                      />
-                    ))}
+          <div className={`flex-1 min-h-0 ${hasNavigated ? 'flex flex-col lg:flex-row gap-4 lg:h-full lg:overflow-hidden' : 'space-y-6 overflow-y-auto mb-4'}`}>
+            {hasNavigated ? (
+              <>
+                {/* Left Column / Top Section - Browser Screen Stream */}
+                <div className="w-full lg:w-2/3 flex-shrink-0 lg:pl-4 px-4 lg:px-0">
+                  <div className="lg:sticky lg:top-4">
+                    <BrowserScreenStream />
                   </div>
-                )}
-              </div>
+                </div>
+                
+                {/* Right Column / Bottom Section - Chat + Input */}
+                <div className="w-full lg:w-1/3 flex flex-col lg:pr-4 px-4 lg:px-0 lg:h-full pb-8">
+                  <div className="border-2 rounded-3xl p-0  flex flex-col lg:h-full h-auto lg:max-h-full max-h-[50vh]">
+                    {/* Chat Conversation */}
+                    <div className="flex-1 overflow-y-auto min-h-0">
+                    <div className="min-h-full">
+                      {chatMessages.length === 0 ? (
+                        <div className="flex items-center justify-center h-full min-h-[400px]">
+                          <motion.div
+                            initial={{ opacity: 0, scale: 0.9 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            transition={{ duration: 0.3 }}
+                            className="flex flex-col items-center justify-center gap-4"
+                          >
+                            {isLoading ? (
+                              <>
+                                <Loader2 className="h-10 w-10 animate-spin text-primary" />
+                                <p className="text-sm text-muted-foreground animate-pulse">Processing your request...</p>
+                              </>
+                            ) : (
+                              <p className="text-muted-foreground text-sm">
+                                {isVoiceMode ? "Start speaking to begin the conversation..." : "Conversation will appear here"}
+                              </p>
+                            )}
+                          </motion.div>
+                        </div>
+                      ) : (
+                        <Chat messages={chatMessages} />
+                      )}
+                    </div>
+                  </div>
+                  
+                  {/* Input form inline in right column / sticky on mobile */}
+                  <div className="flex-shrink-0 lg:relative fixed bottom-0 left-0 right-0 lg:bottom-auto lg:left-auto lg:right-auto bg-zinc-800 lg:rounded-b-3xl p-4 lg:p-0 z-50">
+                    <motion.form
+                      layout
+                      onSubmit={handleSubmit}
+                      className="space-y-4"
+                    >
+                      <Card className="border-0 bg-transparent lg:bg-transparent backdrop-blur-sm rounded-full">
+                        <CardContent className="p-4">
+                          <div className="flex items-center gap-2 lg:gap-3">
+                            {/* Voice Mode Button */}
+                            {isVoiceMode ? (
+                              <div className="flex items-center gap-2 ">
+                                <div className={`h-2 w-2 rounded-full  ${
+                                  isVoiceConnected ? 'bg-green-500 animate-pulse' : 
+                                  isVoiceConnecting ? 'bg-yellow-500 animate-pulse' : 
+                                  'bg-red-500'
+                                }`} />
+                              </div>
+                            ) : null}
+                            
+                            {/* Input */}
+                            <div className="flex-1 relative rounded-full">
+                              <Input
+                                type="text"
+                                placeholder={
+                                  isVoiceMode 
+                                    ? isVoiceConnecting 
+                                      ? "Starting voice mode..." 
+                                      : isVoiceConnected 
+                                        ? "Please talk..." 
+                                        : "Voice mode disconnected"
+                                    : "Ask something..."
+                                }
+                                value={query}
+                                onChange={(e) => setQuery(e.target.value)}
+                                disabled={isLoading || isVoiceMode}
+                                className="h-12 text-sm lg:text-base pr-12 border-2 focus-visible:ring-2 focus-visible:ring-primary/50 rounded-full placeholder:text-xs lg:placeholder:text-sm"
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' && !e.shiftKey && query.trim() && !isLoading) {
+                                    e.preventDefault();
+                                    handleSubmit(e as any);
+                                  }
+                                }}
+                              />
+                            </div>
+
+                            {/* Voice Mode Button / Stop Button */}
+                            {isVoiceMode ? (
+                              <Button
+                                type="button"
+                                onClick={handleStopVoiceMode}
+                                variant="destructive"
+                                className="h-12 px-4 shrink-0 rounded-full"
+                                size="lg"
+                              >
+                                <Mic className="h-5 w-5" />
+                              </Button>
+                            ) : (
+                              <Button
+                                type="button"
+                                onClick={() => setIsVoiceMode(true)}
+                                variant="ghost"
+                                className="h-12 px-3 shrink-0 rounded-full border-2 border-white/30"
+                                size="lg"
+                              >
+                                <Mic className="h-5 w-5" />
+                              </Button>
+                            )}
+
+                            {/* Send / Stop Button */}
+                            <div className="shrink-0">
+                              {shouldShowStop ? (
+                                <Button
+                                  type="button"
+                                  variant="destructive"
+                                  onClick={handleStop}
+                                  className="h-12 px-3 shrink-0 rounded-full"
+                                  size="lg"
+                                >
+                                  <Square className="h-6 w-6" />
+                                  {/* <span className="hidden lg:inline">Stop</span> */}
+                                </Button>
+                              ) : (
+                                <Button
+                                  type="submit"
+                                  disabled={!query.trim() || isLoading || isVoiceMode}
+                                  className="h-12 px-3 shrink-0 rounded-full"
+                                  size="lg"
+                                >
+                                  <Send className="h-6 w-6" />
+                                  {/* <span className="hidden lg:inline">Send</span> */}
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    </motion.form>
+                  </div>
+                  </div>
+                </div>
+              </>
             ) : (
-              <div className="flex-1 flex items-center justify-center">
-                <motion.div
-                  initial={{ opacity: 0, scale: 0.9 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  transition={{ duration: 0.3 }}
-                  className="flex flex-col items-center justify-center gap-4"
-                >
-                  {isLoading ? (
-                    <>
-                      <Loader2 className="h-10 w-10 animate-spin text-primary" />
-                      <p className="text-sm text-muted-foreground animate-pulse">Processing your request...</p>
-                    </>
+              /* Single column layout when no navigation yet */
+              <div className="flex-1">
+                <div className={chatMessages.length === 0 ? "h-96" : "min-h-[400px]"}>
+                  {chatMessages.length === 0 ? (
+                    <div className="flex items-center justify-center h-full">
+                      <motion.div
+                        initial={{ opacity: 0, scale: 0.9 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        transition={{ duration: 0.3 }}
+                        className="flex flex-col items-center justify-center gap-4"
+                      >
+                        {isLoading ? (
+                          <>
+                            <Loader2 className="h-10 w-10 animate-spin text-primary" />
+                            <p className="text-sm text-muted-foreground animate-pulse">Processing your request...</p>
+                          </>
+                        ) : (
+                          <p className="text-muted-foreground text-sm">
+                            {isVoiceMode ? "Start speaking to begin the conversation..." : "Conversation will appear here"}
+                          </p>
+                        )}
+                      </motion.div>
+                    </div>
                   ) : (
-                    <p className="text-muted-foreground">No steps to display</p>
+                    <Chat messages={chatMessages} />
                   )}
-                </motion.div>
+                </div>
               </div>
             )}
           </div>
@@ -1055,8 +1132,8 @@ export default function Home() {
         )}
       </div>
       
-      {/* Input form at bottom when submitted */}
-      {isSubmitted && (
+      {/* Input form at bottom when submitted (only show if no navigation/stream) */}
+      {isSubmitted && !hasNavigated && (
         <motion.div
           layout
           initial={{ opacity: 0 }}
@@ -1073,24 +1150,24 @@ export default function Home() {
               onSubmit={handleSubmit}
               className="space-y-4"
             >
-              <Card className="border-2 bg-transparent backdrop-blur-sm rounded-full">
+              <Card className="border-0 bg-transparent  rounded-full">
                 <CardContent className="p-4">
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2 lg:gap-3">
                     {/* Provider Selector as Custom Dropdown */}
                     <div className="relative" ref={providerDropdownRef}>
                       <button
                         type="button"
                         onClick={() => setIsProviderDropdownOpen(!isProviderDropdownOpen)}
                         disabled={isLoading}
-                        className="h-12 px-8 rounded-full bg-zinc-900 border text-sm font-medium text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="h-12 px-4 lg:px-8 rounded-full bg-zinc-900 border text-sm font-medium text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <span>
-                          {PROVIDER_INFO[provider].label}
-                          {provider === "gemini" && " (Fastest)"}
-                          {provider === "claude" && " (Best)"}
-                          {provider === "openai" && " (Good)"}
+                        <span className="lg:hidden font-bold text-base">
+                          {PROVIDER_INFO[provider].label.charAt(0)}
                         </span>
-                        <ChevronDown className={`h-4 w-4 transition-transform ${isProviderDropdownOpen ? "rotate-180" : ""}`} />
+                        <span className="hidden lg:inline">
+                          {PROVIDER_INFO[provider].label}
+                        </span>
+                        <ChevronDown className={`hidden lg:inline h-4 w-4 transition-transform ${isProviderDropdownOpen ? "rotate-180" : ""}`} />
                       </button>
                       <AnimatePresence>
                         {isProviderDropdownOpen && (
@@ -1099,7 +1176,7 @@ export default function Home() {
                             animate={{ opacity: 1, y: 0 }}
                             exit={{ opacity: 0, y: 10 }}
                             transition={{ duration: 0.2 }}
-                            className="absolute bottom-full left-0 mb-2 w-full min-w-[200px] bg-zinc-900 border rounded-xl shadow-lg z-50 overflow-hidden"
+                            className="absolute bottom-full left-0 mb-2 w-full min-w-[100px] bg-zinc-900 border rounded-xl shadow-lg z-50 overflow-hidden"
                           >
                             {Object.entries(PROVIDER_INFO).map(([key, info]) => (
                               <button
@@ -1117,9 +1194,9 @@ export default function Home() {
                                 } disabled:opacity-50 disabled:cursor-not-allowed`}
                               >
                                 {info.label}
-                                {key === "gemini" && " (Fastest)"}
-                                {key === "claude" && " (Best)"}
-                                {key === "openai" && " (Good)"}
+                                {key === "gemini" }
+                                {key === "claude" }
+                                {key === "openai" }
                               </button>
                             ))}
                           </motion.div>
@@ -1128,14 +1205,22 @@ export default function Home() {
                     </div>
 
                     {/* Input */}
-                    <div className="flex-1 relative ml-4 rounded-full">
+                    <div className="flex-1 relative lg:ml-4 rounded-full">
                       <Input
                         type="text"
-                        placeholder="What would you like me to do in the browser?"
+                        placeholder={
+                          isVoiceMode 
+                            ? isVoiceConnecting 
+                              ? "Starting voice mode..." 
+                              : isVoiceConnected 
+                                ? "Please talk..." 
+                                : "Voice mode disconnected"
+                            : "Ask something..."
+                        }
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
-                        disabled={isLoading}
-                        className="h-12 text-base pr-12 border-2 focus-visible:ring-2 focus-visible:ring-primary/50 rounded-full"
+                        disabled={isLoading || isVoiceMode}
+                        className="h-12 text-sm lg:text-base pr-12 border-2 focus-visible:ring-2 focus-visible:ring-primary/50 rounded-full placeholder:text-xs lg:placeholder:text-sm"
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' && !e.shiftKey && query.trim() && !isLoading) {
                             e.preventDefault();
@@ -1175,53 +1260,22 @@ export default function Home() {
                       <Button
                         type="button"
                         onClick={handleStop}
-                        className="h-12 px-6 shrink-0 rounded-full"
+                        className="h-12 px-3 shrink-0 rounded-full"
                         size="lg"
                       >
-                        <Square className="h-5 w-5 mr-2" />
-                        Stop
+                        <Square className="h-6 w-6" />
                       </Button>
                     ) : (
                       <Button
                         type="submit"
                         disabled={!query.trim() || isLoading}
-                        className="h-12 px-6 shrink-0 rounded-full"
+                        className="h-12 px-3 shrink-0 rounded-full"
                         size="lg"
                       >
-                        <Send className="h-5 w-5 mr-2" />
-                        Send
+                        <Send className="h-6 w-6" />
                       </Button>
                     )}
                   </div>
-                  {/* Voice Mode Status */}
-                  {isVoiceMode && (
-                    <motion.div
-                      initial={{ opacity: 0, height: 0 }}
-                      animate={{ opacity: 1, height: 'auto' }}
-                      exit={{ opacity: 0, height: 0 }}
-                      className="pt-2 border-t mt-4"
-                    >
-                      <div className="flex items-center gap-2 text-sm">
-                        <div className={`h-2 w-2 rounded-full ${
-                          isVoiceConnected ? 'bg-green-500 animate-pulse' : 
-                          isVoiceConnecting ? 'bg-yellow-500 animate-pulse' : 
-                          'bg-red-500'
-                        }`} />
-                        <span className="text-muted-foreground">
-                          {isVoiceConnecting ? "Connecting..." : isVoiceConnected ? "Voice mode active" : "Voice mode disconnected"}
-                        </span>
-                      </div>
-                      {voiceStatus && (
-                        <motion.p 
-                          initial={{ opacity: 0 }}
-                          animate={{ opacity: 1 }}
-                          className="text-xs text-muted-foreground mt-1.5 pl-4"
-                        >
-                          {voiceStatus}
-                        </motion.p>
-                      )}
-                    </motion.div>
-                  )}
                 </CardContent>
               </Card>
             </motion.form>

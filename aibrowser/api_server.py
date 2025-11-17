@@ -22,9 +22,13 @@ from .config import Config
 from .voice.agent_bridge import AgentBridge
 from .voice.pipecat_pipeline import VoicePipeline
 
+# Import screen stream router
+from .screen_stream.router import router as screen_stream_router
+from .screen_stream import router as screen_stream_router_module
+
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="AI Browser API")
+app = FastAPI(title="AI Browser API - Unified Server")
 
 # CORS middleware for frontend
 # Allow localhost for development and Vercel/production domains
@@ -45,6 +49,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include screen stream router for WebRTC video streaming
+app.include_router(screen_stream_router)
 
 # Global state
 _browser_manager: Optional[CDPBrowserManager] = None
@@ -98,19 +105,24 @@ async def get_screenshot_base64(integration: BrowserUseIntegration) -> Optional[
 
 
 async def ensure_browser_initialized() -> bool:
-    #Start browser only when first query is made.
+    """Ensure browser is initialized and running."""
     global _browser_manager, _text_integration, _last_activity_time
     
     if _browser_manager and await _browser_manager.is_running():
         _last_activity_time = time.time()
         return True
     
-    logger.info("Initializing browser for first query...")
+    logger.info("Initializing browser...")
     
     port = int(os.getenv('CHROME_DEBUG_PORT', '9222'))
     headless = os.getenv('CHROMIUM_HEADLESS', 'false').lower() in {'1', 'true', 'yes', 'on'}
     
     _browser_manager = CDPBrowserManager(port=port, headless=headless)
+    
+    # Share browser manager with screen stream module early
+    # so it can start the browser if needed
+    screen_stream_router_module._browser_pool = _browser_manager
+    
     started = await _browser_manager.start()
     if not started or _browser_manager.endpoint is None:
         logger.error('Failed to start Chromium')
@@ -196,18 +208,23 @@ async def cleanup_browser() -> None:
 
 @app.on_event("startup")
 async def startup():
-    """Initialize API server without starting browser."""
+    """Initialize API server and browser on startup."""
     global _cleanup_task
     
     if not Config.validate():
         logger.error("Configuration validation failed")
         sys.exit(1)
     
-    logger.info("Starting API server... (browser will start on first query)")
+    logger.info("Starting API server and initializing browser...")
+    
+    # Initialize browser immediately on startup
+    if not await ensure_browser_initialized():
+        logger.error("Failed to initialize browser on startup")
+        sys.exit(1)
     
     _cleanup_task = asyncio.create_task(cleanup_browser_if_idle())
     
-    logger.info("API server ready")
+    logger.info("API server ready with browser initialized")
 
 
 @app.on_event("shutdown")
@@ -325,12 +342,17 @@ async def query_text(request: QueryRequest):
             try:
                 result = await _text_integration.run(request.query, is_continuation=False)
                 run_result[0] = result
+            except asyncio.CancelledError:
+                logger.info('Agent task was cancelled')
+                run_error[0] = Exception('Task cancelled by user')
+                raise
             except Exception as e:
                 run_error[0] = e
             finally:
                 run_complete.set()
         
         run_task = asyncio.create_task(run_agent())
+        client_disconnected = False
         
         try:
             while not run_complete.is_set() or not queue.empty():
@@ -342,6 +364,12 @@ async def query_text(request: QueryRequest):
                         if run_complete.is_set():
                             break
                         continue
+                except (GeneratorExit, asyncio.CancelledError):
+                    # Client disconnected or stopped
+                    logger.info('Client disconnected, cancelling agent task')
+                    client_disconnected = True
+                    run_task.cancel()
+                    raise
                 except Exception as e:
                     logger.debug('Error in queue processing: %s', e)
             
@@ -358,11 +386,32 @@ async def query_text(request: QueryRequest):
                 }
                 yield f'data: {json.dumps(completion_data)}\n\n'.encode()
                     
+        except (GeneratorExit, asyncio.CancelledError):
+            # Client disconnected, cancel the agent task
+            if not run_task.done():
+                logger.info('Cancelling agent task due to client disconnect')
+                run_task.cancel()
+                try:
+                    await run_task
+                except asyncio.CancelledError:
+                    logger.info('Agent task cancelled successfully')
         except Exception as e:
             logger.error('Error processing query: %s', e, exc_info=True)
+            # Cancel task on error
+            if not run_task.done():
+                run_task.cancel()
             error_data = {"type": "error", "error": str(e)}
             yield f'data: {json.dumps(error_data)}\n\n'.encode()
         finally:
+            # Ensure task is cancelled if still running
+            if not run_task.done():
+                logger.info('Ensuring agent task is cancelled in finally block')
+                run_task.cancel()
+                try:
+                    await run_task
+                except asyncio.CancelledError:
+                    pass
+            
             if _text_integration:
                 _text_integration.update_callbacks(step_callback=original_step)
             _active_connections.discard(connection_id)
@@ -517,7 +566,35 @@ async def websocket_voice(websocket: WebSocket):
                     if text and _voice_bridge:
                         await _voice_bridge.process_user_text(text)
                 
+                elif data.get("type") == "audio_playback_complete":
+                    # Frontend signals that audio playback has completed
+                    if _voice_bridge:
+                        _voice_bridge.signal_audio_playback_complete()
+                
                 elif data.get("type") == "stop":
+                    # Stop voice pipeline completely
+                    logger.info("Voice mode stop requested - shutting down pipeline")
+                    
+                    # Stop pipeline first
+                    if _voice_pipeline:
+                        try:
+                            await _voice_pipeline.stop()
+                        except Exception as e:
+                            logger.error(f"Error stopping voice pipeline: {e}")
+                    
+                    # Clear global references
+                    _voice_pipeline = None
+                    _voice_bridge = None
+                    
+                    # Shutdown voice integration but keep text integration intact
+                    if _voice_integration:
+                        try:
+                            await _voice_integration.shutdown()
+                        except Exception as e:
+                            logger.error(f"Error shutting down voice integration: {e}")
+                        _voice_integration = None
+                    
+                    logger.info("Voice pipeline stopped successfully - text mode ready")
                     break
                     
             except WebSocketDisconnect:
@@ -538,11 +615,28 @@ async def websocket_voice(websocket: WebSocket):
         if is_connected():
             await safe_send_json({"type": "error", "error": str(e)})
     finally:
+        # Stop voice pipeline when WebSocket disconnects
+        logger.info("Voice WebSocket connection closed - stopping voice pipeline")
+        
+        if _voice_pipeline:
+            try:
+                await _voice_pipeline.stop()
+            except Exception as e:
+                logger.error(f"Error stopping voice pipeline in finally block: {e}")
+            _voice_pipeline = None
+        
         if _voice_bridge:
             _voice_bridge.on_user_speech = None
             _voice_bridge.on_agent_response = None
+            _voice_bridge = None
+        
         if _voice_integration:
             _voice_integration.update_callbacks(step_callback=None)
+            try:
+                await _voice_integration.shutdown()
+            except Exception as e:
+                logger.error(f"Error shutting down voice integration in finally block: {e}")
+            _voice_integration = None
         
         if voice_connection_id:
             _active_connections.discard(voice_connection_id)
@@ -553,6 +647,8 @@ async def websocket_voice(websocket: WebSocket):
                 await websocket.close()
             except Exception:
                 pass
+        
+        logger.info("Voice pipeline cleanup complete")
 
 
 @app.post("/api/cleanup")
@@ -567,6 +663,80 @@ async def cleanup_endpoint():
     asyncio.create_task(cleanup_browser())
     
     return {"status": "cleanup initiated"}
+
+
+@app.post("/api/stop-voice")
+async def stop_voice():
+    """Stop voice pipeline when frontend closes or voice mode is disabled."""
+    global _voice_pipeline, _voice_bridge, _voice_integration
+    
+    logger.info("Stop voice endpoint called - shutting down voice pipeline")
+    
+    try:
+        # Stop pipeline first
+        if _voice_pipeline:
+            try:
+                await _voice_pipeline.stop()
+            except Exception as e:
+                logger.error(f"Error stopping voice pipeline: {e}")
+        
+        # Clear global references
+        _voice_pipeline = None
+        _voice_bridge = None
+        
+        # Shutdown voice integration
+        if _voice_integration:
+            try:
+                await _voice_integration.shutdown()
+            except Exception as e:
+                logger.error(f"Error shutting down voice integration: {e}")
+            _voice_integration = None
+        
+        logger.info("Voice pipeline stopped successfully")
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Error in stop voice endpoint: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/reset-browser")
+async def reset_browser():
+    """Reset browser to blank page when frontend closes."""
+    global _browser_manager
+    
+    try:
+        if _browser_manager and await _browser_manager.is_running():
+            logger.info("Resetting browser to blank page")
+            
+            # Get CDP websocket URL
+            cdp_url = await _browser_manager.websocket_url()
+            if not cdp_url:
+                logger.warning("No CDP URL available")
+                return {"status": "error", "message": "Browser not running"}
+            
+            # Connect to CDP and navigate to blank page
+            async with aiohttp.ClientSession() as session:
+                async with session.ws_connect(cdp_url) as ws:
+                    # Enable Page domain
+                    await ws.send_json({"id": 1, "method": "Page.enable"})
+                    await ws.receive()
+                    
+                    # Navigate to about:blank
+                    await ws.send_json({
+                        "id": 2,
+                        "method": "Page.navigate",
+                        "params": {"url": "about:blank"}
+                    })
+                    await ws.receive()
+            
+            logger.info("Browser reset to blank page successfully")
+            return {"status": "success"}
+        else:
+            logger.info("Browser not running, nothing to reset")
+            return {"status": "not_running"}
+    except Exception as e:
+        logger.error(f"Error resetting browser: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
 
 
 @app.get("/health")

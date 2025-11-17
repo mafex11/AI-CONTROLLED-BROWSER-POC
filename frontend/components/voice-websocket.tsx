@@ -186,6 +186,12 @@ export function useVoiceWebSocket(props: VoiceWebSocketProps) {
       wsRef.current.send(JSON.stringify({ type: "text_input", text }));
     }
   }, []);
+  
+  const sendMessage = useCallback((message: Record<string, unknown>) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(message));
+    }
+  }, []);
 
   const disconnect = useCallback(() => {
     intentionallyDisconnectedRef.current = true;
@@ -212,6 +218,7 @@ export function useVoiceWebSocket(props: VoiceWebSocketProps) {
     isConnected,
     isConnecting,
     sendText,
+    sendMessage,
     disconnect,
   };
 }
