@@ -119,7 +119,7 @@ class ScreenStreamSession:
             logger.info("ICE connection state: %s", self.pc.iceConnectionState)
 
         # Initialize screen capture
-        self.capture = CDPScreenCapture(cdp_url=self.cdp_url, fps=10, quality=75)
+        self.capture = CDPScreenCapture(cdp_url=self.cdp_url, fps=60, quality=100)
         await self.capture.start()
 
         # Create and add video track

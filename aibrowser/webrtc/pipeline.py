@@ -37,7 +37,8 @@ class WebRTCPipeline:
         agent_bridge: AgentBridge,
         deepgram_language: str = Config.DEEPGRAM_LANGUAGE,
         elevenlabs_voice_id: str = Config.ELEVENLABS_VOICE_ID,
-        sample_rate: int = 16000,
+        audio_in_sample_rate: int = 16000,  # Silero VAD only supports 16000 or 8000
+        audio_out_sample_rate: int = 24000,  # Match ElevenLabs default to avoid playback speed issues
         channels: int = 1,
     ) -> None:
         if not Config.validate_voice():
@@ -45,7 +46,8 @@ class WebRTCPipeline:
 
         self.connection = connection
         self.agent_bridge = agent_bridge
-        self.sample_rate = sample_rate
+        self.audio_in_sample_rate = audio_in_sample_rate
+        self.audio_out_sample_rate = audio_out_sample_rate
         self.channels = channels
         self.deepgram_language = deepgram_language
         self.elevenlabs_voice_id = elevenlabs_voice_id
@@ -70,10 +72,10 @@ class WebRTCPipeline:
 
         transport_params = TransportParams(
             audio_in_enabled=True,
-            audio_in_sample_rate=self.sample_rate,
+            audio_in_sample_rate=self.audio_in_sample_rate,
             audio_in_channels=self.channels,
             audio_out_enabled=True,
-            audio_out_sample_rate=self.sample_rate,
+            audio_out_sample_rate=self.audio_out_sample_rate,
             audio_out_channels=self.channels,
             vad_analyzer=vad_analyzer,
         )
@@ -101,6 +103,7 @@ class WebRTCPipeline:
         tts_service = ElevenLabsTTSService(
             api_key=Config.ELEVENLABS_API_KEY,
             voice_id=self.elevenlabs_voice_id,
+            sample_rate=self.audio_out_sample_rate,
         )
 
         self.pipeline = Pipeline(
