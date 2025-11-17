@@ -9,7 +9,13 @@ env/
 ENV/
 .venv
 
-# IDEs
+# Frontend
+frontend/
+node_modules/
+.next/
+*.log
+
+# IDE
 .vscode/
 .idea/
 *.swp
@@ -26,37 +32,32 @@ Thumbs.db
 
 # Documentation
 *.md
-docs/
+README*
+*.txt
+!requirements.txt
 
-# Tests
-tests/
-test_*.py
-*_test.py
+# Docker
+docker-compose.yml
+Dockerfile
+.dockerignore
 
-# Build artifacts
-*.egg-info/
-dist/
-build/
-*.egg
-
-# Logs
-*.log
-logs/
+# Screenshots and cache
+my_screenshots/
+*.png
+*.jpg
+*.jpeg
 
 # Environment files
 .env
 .env.local
 .env.*.local
 
-# Docker
-Dockerfile*
-docker-compose*.yml
-.dockerignore
+# Test files
+tests/
+test_*.py
+*_test.py
 
-# Other
-*.cache
-.pytest_cache/
-.coverage
-htmlcov/
-
-
+# Build artifacts
+dist/
+build/
+*.egg-info/

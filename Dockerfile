@@ -1,7 +1,7 @@
-# Multi-stage build for AI Browser application
+# Multi-stage build for AI Browser backend API
 FROM python:3.13-slim AS base
 
-# Install system dependencies for Chromium/Playwright and audio
+# Install system dependencies for Chromium/Playwright
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -26,16 +26,15 @@ RUN apt-get update && apt-get install -y \
     libxrandr2 \
     xdg-utils \
     libxss1 \
-    libasound2-dev \
+    build-essential \
     portaudio19-dev \
     python3-dev \
-    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
 
-# Install uv first
+# Install uv for faster package installation
 RUN pip install --no-cache-dir uv
 
 # Copy requirements first for better caching
@@ -51,27 +50,26 @@ RUN pip install playwright && \
     playwright install-deps chromium
 
 # Copy application code
-COPY . .
+COPY aibrowser/ ./aibrowser/
+COPY run_api_server.py .
+COPY run_webrtc_server.py .
 
 # Create cache directory for Chromium profile
 RUN mkdir -p /root/.cache/aibrowser/chromium_profile
 
-# Copy entrypoint script
-COPY docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV CHROMIUM_HEADLESS=true
-ENV CHROME_DEBUG_PORT=9222
+ENV CHROME_DEBUG_PORT=9224
 ENV PYTHONPATH=/app
+ENV PORT=8000
 
-# Expose CDP port
-EXPOSE 9222
+# Expose API port (Cloud Run uses PORT env var)
+EXPOSE 8000
 
-# Use entrypoint script
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+# Health check for Cloud Run
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD python -c "import requests; requests.get('http://localhost:8000/docs', timeout=5)" || exit 1
 
-# Default command (can be overridden)
-CMD ["python", "-m", "aibrowser.main"]
-
+# Run the API server
+CMD ["python", "run_api_server.py"]
