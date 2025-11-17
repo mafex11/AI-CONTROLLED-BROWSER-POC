@@ -206,7 +206,8 @@ class BrowserUseIntegration:
 				max_tokens=Config.CLAUDE_MAX_TOKENS,
 				top_p=Config.CLAUDE_TOP_P,
 				timeout=Timeout(Config.CLAUDE_TIMEOUT, connect=10.0), 
-				max_retries=Config.CLAUDE_MAX_RETRIES,  
+				max_retries=Config.CLAUDE_MAX_RETRIES,
+			)  
 		elif Config.LLM_PROVIDER == 'openai':
 			openai_kwargs = {
 				'model': Config.OPENAI_MODEL,
