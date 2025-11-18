@@ -88,6 +88,10 @@ class CDPBrowserManager:
 			'--disable-dev-shm-usage',
 			'--force-device-scale-factor=1',
 			'--window-size=1920,1080',
+			# Docker-specific flags
+			'--no-sandbox',
+			'--disable-setuid-sandbox',
+			'--disable-gpu',
 		]
 		if self.headless:
 			args.append('--headless=new')

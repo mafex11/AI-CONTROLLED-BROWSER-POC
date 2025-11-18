@@ -1,0 +1,64 @@
+# Production Docker Compose for Google Cloud Run / Compute Engine
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: aibrowser-backend
+    network_mode: host
+    environment:
+      # Chrome settings
+      - CHROMIUM_HEADLESS=true
+      - CHROME_DEBUG_PORT=9222
+      - DEFAULT_SEARCH_ENGINE=google
+      
+      # LLM Provider
+      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
+      
+      # Pipecat (Voice)
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      
+      # Gemini
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      
+      # OpenAI
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-5}
+      
+      # Claude
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-5}
+      
+      # Screenshot settings
+      - SAVE_HIGHLIGHT_SCREENSHOTS=false
+      - SCREENSHOT_DIR=/app/screenshots
+      - HIGHLIGHT_ELEMENTS=true
+      
+      # WebRTC Screen Stream
+      - WEBRTC_SCREEN_STREAM_ENABLED=true
+      - WEBRTC_SCREEN_STREAM_FPS=60
+      - WEBRTC_SCREEN_STREAM_WIDTH=1280
+      - WEBRTC_SCREEN_STREAM_HEIGHT=720
+      
+      # TURN Server (Coturn) - REQUIRED for cloud deployment
+      - COTURN_HOST=${COTURN_HOST}
+      - COTURN_PORT=${COTURN_PORT:-3478}
+      - COTURN_USERNAME=${COTURN_USERNAME}
+      - COTURN_PASSWORD=${COTURN_PASSWORD}
+      
+      # Public IP for ICE candidates (IMPORTANT for cloud deployment)
+      - PUBLIC_IP=${PUBLIC_IP}
+    volumes:
+      - ./screenshots:/app/screenshots
+      - chrome-data:/tmp/chrome-user-data
+    restart: unless-stopped
+    security_opt:
+      - seccomp:unconfined
+    shm_size: 2gb
+
+volumes:
+  chrome-data:
+    driver: local
+

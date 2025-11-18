@@ -1,0 +1,65 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: aibrowser-backend
+    ports:
+      - "8000:8000"
+    environment:
+      # Chrome settings
+      - CHROMIUM_HEADLESS=true
+      - CHROME_DEBUG_PORT=9222
+      - DEFAULT_SEARCH_ENGINE=google
+      
+      # LLM Provider
+      - LLM_PROVIDER=gemini
+      
+      # Pipecat (Voice)
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      
+      # Gemini
+      - GEMINI_MODEL=gemini-2.5-flash
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      
+      # OpenAI
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=gpt-5
+      
+      # Claude
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CLAUDE_MODEL=claude-sonnet-4-5
+      
+      # Screenshot settings
+      - SAVE_HIGHLIGHT_SCREENSHOTS=false
+      - SCREENSHOT_DIR=/app/screenshots
+      - HIGHLIGHT_ELEMENTS=true
+      
+      # WebRTC Screen Stream
+      - WEBRTC_SCREEN_STREAM_ENABLED=true
+      - WEBRTC_SCREEN_STREAM_FPS=60
+      - WEBRTC_SCREEN_STREAM_WIDTH=1280
+      - WEBRTC_SCREEN_STREAM_HEIGHT=720
+      # TURN Server (Coturn)
+      - COTURN_HOST=34.93.0.226
+      - COTURN_PORT=3478
+      - COTURN_USERNAME=mafex
+      - COTURN_PASSWORD=mafex
+    volumes:
+      # Mount screenshots directory
+      - ./screenshots:/app/screenshots
+      # Chrome user data (for persistence)
+      - chrome-data:/tmp/chrome-user-data
+    restart: unless-stopped
+    # Security options for Chrome in Docker
+    security_opt:
+      - seccomp:unconfined
+    shm_size: 2gb
+    # Note: Using bridge network for Windows/Mac
+    # For Linux deployment (GCC), use docker-compose.production.yml with host network
+
+volumes:
+  chrome-data:
+    driver: local
+
