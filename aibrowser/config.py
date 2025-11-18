@@ -121,7 +121,20 @@ class Config:
 	SAVE_HIGHLIGHT_SCREENSHOTS: bool = os.getenv('SAVE_HIGHLIGHT_SCREENSHOTS', 'false').lower() in {'true', '1', 'yes'}
 	SCREENSHOT_DIR: str = os.getenv('SCREENSHOT_DIR', './screenshots').strip()
 	_HIGHLIGHT_SCREENSHOT_DELAY, _ = _parse_float('HIGHLIGHT_SCREENSHOT_DELAY', 0.5)
-	HIGHLIGHT_SCREENSHOT_DELAY: float = _HIGHLIGHT_SCREENSHOT_DELAY  
+	HIGHLIGHT_SCREENSHOT_DELAY: float = _HIGHLIGHT_SCREENSHOT_DELAY
+	
+	# Screen stream configuration
+	_SCREEN_STREAM_FPS, _ = _parse_int('SCREEN_STREAM_FPS', 15)
+	SCREEN_STREAM_FPS: int = max(1, min(60, _SCREEN_STREAM_FPS))  # Clamp between 1-60
+	
+	_SCREEN_STREAM_QUALITY, _ = _parse_int('SCREEN_STREAM_QUALITY', 60)
+	SCREEN_STREAM_QUALITY: int = max(1, min(100, _SCREEN_STREAM_QUALITY))  # Clamp between 1-100
+	
+	_SCREEN_STREAM_WIDTH, _ = _parse_int('SCREEN_STREAM_WIDTH', 1280)
+	SCREEN_STREAM_WIDTH: int = _SCREEN_STREAM_WIDTH
+	
+	_SCREEN_STREAM_HEIGHT, _ = _parse_int('SCREEN_STREAM_HEIGHT', 720)
+	SCREEN_STREAM_HEIGHT: int = _SCREEN_STREAM_HEIGHT  
 
 	@classmethod
 	def validate(cls) -> bool:

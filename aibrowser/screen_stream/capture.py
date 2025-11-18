@@ -11,6 +11,8 @@ import aiohttp
 from PIL import Image
 import io
 
+from ..config import Config
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,31 +22,37 @@ class CDPScreenCapture:
     def __init__(
         self,
         cdp_url: str,
-        fps: int = 60,
-        quality: int = 100,
+        fps: int = None,
+        quality: int = None,
         format: str = "jpeg",
+        width: int = None,
+        height: int = None,
     ) -> None:
         """
-        Initialize CDP screen capture with high quality settings.
+        Initialize CDP screen capture.
 
         Args:
             cdp_url: WebSocket URL for Chrome DevTools Protocol
-            fps: Frames per second for capture (default 60 for smooth video)
-            quality: JPEG quality 1-100 (default 100 for maximum quality)
+            fps: Frames per second for capture (default from Config.SCREEN_STREAM_FPS)
+            quality: JPEG quality 1-100 (default from Config.SCREEN_STREAM_QUALITY)
             format: Image format 'jpeg' or 'png'
+            width: Frame width (default from Config.SCREEN_STREAM_WIDTH)
+            height: Frame height (default from Config.SCREEN_STREAM_HEIGHT)
         """
         self.cdp_url = cdp_url
-        self.fps = fps
-        self.quality = quality
+        self.fps = fps if fps is not None else Config.SCREEN_STREAM_FPS
+        self.quality = quality if quality is not None else Config.SCREEN_STREAM_QUALITY
         self.format = format
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._running = False
-        self._frame_queue: asyncio.Queue = asyncio.Queue(maxsize=30)  # Larger buffer for 60fps
+        # Buffer size based on FPS - keep ~2 seconds of frames
+        buffer_size = max(10, min(30, self.fps * 2))
+        self._frame_queue: asyncio.Queue = asyncio.Queue(maxsize=buffer_size)
         self._capture_task: Optional[asyncio.Task] = None
         self._message_id = 0
-        self._frame_width = 1280  # 720p width
-        self._frame_height = 720   # 720p height
+        self._frame_width = width if width is not None else Config.SCREEN_STREAM_WIDTH
+        self._frame_height = height if height is not None else Config.SCREEN_STREAM_HEIGHT
 
     async def start(self) -> None:
         """Start capturing frames from the browser."""
@@ -74,7 +82,7 @@ class CDPScreenCapture:
         self._ws = await self._session.ws_connect(self.cdp_url)
         self._running = True
         
-        # Set viewport size for 720p capture (improves video quality)
+        # Set viewport size
         try:
             await self._send_command(
                 "Emulation.setDeviceMetricsOverride",
@@ -85,7 +93,7 @@ class CDPScreenCapture:
                     "mobile": False,
                 }
             )
-            logger.info("Set viewport to %dx%d for 720p capture", self._frame_width, self._frame_height)
+            logger.info("Set viewport to %dx%d", self._frame_width, self._frame_height)
         except Exception as e:
             logger.warning("Failed to set viewport size: %s (will use default)", e)
 

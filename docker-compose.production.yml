@@ -36,11 +36,11 @@ services:
       - SCREENSHOT_DIR=/app/screenshots
       - HIGHLIGHT_ELEMENTS=true
       
-      # WebRTC Screen Stream
-      - WEBRTC_SCREEN_STREAM_ENABLED=true
-      - WEBRTC_SCREEN_STREAM_FPS=60
-      - WEBRTC_SCREEN_STREAM_WIDTH=1280
-      - WEBRTC_SCREEN_STREAM_HEIGHT=720
+      # Screen stream settings
+      - SCREEN_STREAM_FPS=${SCREEN_STREAM_FPS:-60}
+      - SCREEN_STREAM_QUALITY=${SCREEN_STREAM_QUALITY:-70}
+      - SCREEN_STREAM_WIDTH=${SCREEN_STREAM_WIDTH:-1280}
+      - SCREEN_STREAM_HEIGHT=${SCREEN_STREAM_HEIGHT:-720}
       
       # TURN Server (Coturn) - REQUIRED for cloud deployment
       - COTURN_HOST=${COTURN_HOST}

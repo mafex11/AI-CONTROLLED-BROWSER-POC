@@ -38,11 +38,11 @@ services:
       - SCREENSHOT_DIR=/app/screenshots
       - HIGHLIGHT_ELEMENTS=true
       
-      # WebRTC Screen Stream
-      - WEBRTC_SCREEN_STREAM_ENABLED=true
-      - WEBRTC_SCREEN_STREAM_FPS=60
-      - WEBRTC_SCREEN_STREAM_WIDTH=1280
-      - WEBRTC_SCREEN_STREAM_HEIGHT=720
+      # Screen stream settings (lower quality for better performance)
+      - SCREEN_STREAM_FPS=30
+      - SCREEN_STREAM_QUALITY=70
+      - SCREEN_STREAM_WIDTH=1280
+      - SCREEN_STREAM_HEIGHT=720
       # TURN Server (Coturn)
       - COTURN_HOST=34.93.0.226
       - COTURN_PORT=3478
