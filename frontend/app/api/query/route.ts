@@ -20,7 +20,7 @@ export async function POST(request: NextRequest) {
     
     // Create abort controller in outer scope so cancel() can access it
     const backendAbortController = new AbortController();
-    let backendReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+    let backendReader: ReadableStreamDefaultReader<Uint8Array> | null | undefined = null;
     
     const stream = new ReadableStream({
       async start(controller) {
