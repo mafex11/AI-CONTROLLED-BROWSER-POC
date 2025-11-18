@@ -32,6 +32,7 @@ export function BrowserScreenStream() {
   const [state, setState] = useState<ConnectionState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -39,10 +40,12 @@ export function BrowserScreenStream() {
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasAutoConnectedRef = useRef(false);
+  const videoPlayingHandlerRef = useRef<(() => void) | null>(null);
 
   const reset = useCallback(() => {
     setState("idle");
     setErrorMessage(null);
+    setIsVideoPlaying(false);
     sessionIdRef.current = null;
   }, []);
 
@@ -71,9 +74,17 @@ export function BrowserScreenStream() {
     }
 
     const video = videoRef.current;
-    if (video && video.srcObject instanceof MediaStream) {
-      video.srcObject.getTracks().forEach((track) => track.stop());
-      video.srcObject = null;
+    if (video) {
+      // Remove event listener
+      if (videoPlayingHandlerRef.current) {
+        video.removeEventListener("playing", videoPlayingHandlerRef.current);
+        videoPlayingHandlerRef.current = null;
+      }
+      
+      if (video.srcObject instanceof MediaStream) {
+        video.srcObject.getTracks().forEach((track) => track.stop());
+        video.srcObject = null;
+      }
     }
 
     reset();
@@ -111,6 +122,14 @@ export function BrowserScreenStream() {
         videoRef.current.srcObject = remoteStream;
         videoRef.current.autoplay = true;
         videoRef.current.playsInline = true;
+        
+        // Listen for when video starts playing
+        const handlePlaying = () => {
+          setIsVideoPlaying(true);
+        };
+        
+        videoPlayingHandlerRef.current = handlePlaying;
+        videoRef.current.addEventListener("playing", handlePlaying);
       }
 
       pc.ontrack = (event) => {
@@ -201,10 +220,14 @@ export function BrowserScreenStream() {
         ref={containerRef}
         className="relative aspect-video w-full overflow-hidden rounded-3xl border bg-black shadow-2xl"
       >
-        {state === "connecting" && (
+        {(state === "idle" || state === "connecting" || (state === "connected" && !isVideoPlaying)) && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-10 gap-3">
             <Loader2 className="h-8 w-8 text-white animate-spin" />
-            <div className="text-white text-sm">Connecting to browser stream...</div>
+            <div className="text-white text-sm">
+              {state === "idle" || state === "connecting" 
+                ? "Connecting to browser stream..." 
+                : "Loading video stream..."}
+            </div>
           </div>
         )}
         {state === "error" && errorMessage && (

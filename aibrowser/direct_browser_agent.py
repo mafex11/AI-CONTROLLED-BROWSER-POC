@@ -110,6 +110,9 @@ class DirectBrowserAgent:
 				logger.debug('No cached state, fetching initial browser state...')
 				state = await self.controller.refresh_state(include_dom=True, include_screenshot=False)
 				logger.debug('Initial browser state retrieved (URL: %s)', state.url if state else 'unknown')
+			except asyncio.CancelledError:
+				logger.info('Agent task cancelled during initial state fetch')
+				raise
 			except Exception as error:  # noqa: BLE001
 				logger.error('Failed to get initial browser state: %s', error, exc_info=True)
 				return AgentRunResult(
@@ -125,6 +128,9 @@ class DirectBrowserAgent:
 			logger.debug('Using cached browser state (URL: %s) - will refresh in first step if needed', state.url if state else 'unknown')
 
 		for step in range(1, self.config.max_steps + 1):
+			# Check for cancellation at the start of each step
+			await asyncio.sleep(0)
+			
 			logger.debug('Agent step %d/%d', step, self.config.max_steps)
 			step_start_time = time.time()
 			
@@ -257,6 +263,9 @@ class DirectBrowserAgent:
 						continue  	
 					raise last_error if last_error else Exception('LLM invocation failed')
 					
+			except asyncio.CancelledError:
+				logger.info('Agent task cancelled during LLM invocation')
+				raise
 			except asyncio.TimeoutError:
 				logger.error('LLM invocation timed out after 60 seconds')
 				return AgentRunResult(
@@ -364,6 +373,9 @@ class DirectBrowserAgent:
 					result = self.step_callback(step, reasoning_text, agent_response_text, tool_info, 'before')
 					if asyncio.iscoroutine(result):
 						await result
+				except asyncio.CancelledError:
+					logger.info('Agent task cancelled during step callback')
+					raise
 				except Exception as callback_error:  # noqa: BLE001
 					logger.warning('Step callback error: %s', callback_error)
 			
@@ -418,6 +430,9 @@ class DirectBrowserAgent:
 					timeout=45.0
 				)
 				logger.debug('Action %s completed at step %d', action_type, step)
+			except asyncio.CancelledError:
+				logger.info('Agent task cancelled during action execution')
+				raise
 			except asyncio.TimeoutError:
 				logger.error('Action %s timed out after 45 seconds at step %d', action_type, step)
 				result_str = f'Action {action_type} timed out after 45 seconds'
@@ -490,6 +505,9 @@ class DirectBrowserAgent:
 					callback_result = self.step_callback(step, reasoning_text, after_response, f'{tool_info} → {result_summary}', 'after')
 					if asyncio.iscoroutine(callback_result):
 						await callback_result
+				except asyncio.CancelledError:
+					logger.info('Agent task cancelled during step callback (after)')
+					raise
 				except Exception as callback_error: 
 					logger.warning('Step callback error (after): %s', callback_error)
 

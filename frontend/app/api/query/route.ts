@@ -16,16 +16,22 @@ export async function POST(request: NextRequest) {
 
     // Create a readable stream for Server-Sent Events
     const encoder = new TextEncoder();
+    
+    // Create abort controller in outer scope so cancel() can access it
+    const backendAbortController = new AbortController();
+    let backendReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+    
     const stream = new ReadableStream({
       async start(controller) {
         try {
           const backendUrl = process.env.BACKEND_URL || "http://localhost:8000";
           
-          // Call the Python FastAPI backend
+          // Call the Python FastAPI backend with abort signal
           const response = await fetch(`${backendUrl}/api/query`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ query, voiceMode, provider }),
+            signal: backendAbortController.signal,
           });
 
           if (!response.ok) {
@@ -33,8 +39,8 @@ export async function POST(request: NextRequest) {
           }
 
           // Stream the response from backend
-          const reader = response.body?.getReader();
-          if (!reader) {
+          backendReader = response.body?.getReader();
+          if (!backendReader) {
             throw new Error("No response body");
           }
 
@@ -42,7 +48,7 @@ export async function POST(request: NextRequest) {
           let buffer = "";
 
           while (true) {
-            const { done, value } = await reader.read();
+            const { done, value } = await backendReader.read();
             if (done) break;
 
             buffer += decoder.decode(value, { stream: true });
@@ -58,14 +64,28 @@ export async function POST(request: NextRequest) {
 
           controller.close();
         } catch (error) {
-          const errorData = JSON.stringify({
-            type: "error",
-            error: error instanceof Error ? error.message : "Unknown error",
-          });
-          controller.enqueue(encoder.encode(`data: ${errorData}\n\n`));
+          if (error instanceof Error && error.name === "AbortError") {
+            console.log("Backend request aborted by client disconnect");
+          } else {
+            const errorData = JSON.stringify({
+              type: "error",
+              error: error instanceof Error ? error.message : "Unknown error",
+            });
+            controller.enqueue(encoder.encode(`data: ${errorData}\n\n`));
+          }
           controller.close();
         }
       },
+      cancel() {
+        // This is called when the client disconnects
+        console.log("Client disconnected, aborting backend request");
+        backendAbortController.abort();
+        if (backendReader) {
+          backendReader.cancel().catch(() => {
+            // Ignore errors when cancelling reader
+          });
+        }
+      }
     });
 
     return new Response(stream, {

@@ -7,9 +7,9 @@ import logging
 from typing import Optional
 
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCConfiguration, RTCIceServer
-from aiortc.contrib.media import MediaBlackhole
 from av import VideoFrame
 import numpy as np
+from aioice import Candidate as AioIceCandidate
 
 from .capture import CDPScreenCapture
 
@@ -145,14 +145,55 @@ class ScreenStreamSession:
         """Add an ICE candidate to the peer connection."""
         if self.pc:
             from aiortc import RTCIceCandidate
-            
-            ice_candidate = RTCIceCandidate(
-                candidate=candidate.get("candidate", ""),
-                sdpMid=candidate.get("sdpMid"),
-                sdpMLineIndex=candidate.get("sdpMLineIndex"),
-            )
+
+            candidate_str = candidate.get("candidate")
+            if not candidate_str:
+                await self.pc.addIceCandidate(None)
+                logger.debug(
+                    "Received end-of-candidates for session %s", self.session_id
+                )
+                return
+
+            ice_kwargs = {
+                "candidate": candidate_str,
+                "sdpMid": candidate.get("sdpMid"),
+                "sdpMLineIndex": candidate.get("sdpMLineIndex"),
+            }
+
+            try:
+                ice_candidate = RTCIceCandidate(**ice_kwargs)
+            except TypeError:
+                ice_candidate = self._create_legacy_ice_candidate(
+                    RTCIceCandidate, ice_kwargs
+                )
+
             await self.pc.addIceCandidate(ice_candidate)
             logger.debug("Added ICE candidate for session %s", self.session_id)
+
+    @staticmethod
+    def _create_legacy_ice_candidate(RTCIceCandidateClass, ice_kwargs: dict) -> Optional["RTCIceCandidate"]:
+        """Build an RTCIceCandidate for older aiortc versions."""
+        candidate_value = ice_kwargs["candidate"]
+        if candidate_value.startswith("candidate:"):
+            candidate_value = candidate_value.split("candidate:", 1)[1]
+
+        parsed = AioIceCandidate.from_sdp(candidate_value)
+
+        legacy_candidate = RTCIceCandidateClass(
+            component=parsed.component,
+            foundation=parsed.foundation,
+            ip=parsed.host,
+            port=parsed.port,
+            priority=parsed.priority,
+            protocol=parsed.transport,
+            type=parsed.type,
+            relatedAddress=parsed.related_address,
+            relatedPort=parsed.related_port,
+            sdpMid=ice_kwargs["sdpMid"],
+            sdpMLineIndex=ice_kwargs["sdpMLineIndex"],
+            tcpType=parsed.tcptype,
+        )
+        return legacy_candidate
 
     async def close(self) -> None:
         """Close the session and cleanup resources."""
