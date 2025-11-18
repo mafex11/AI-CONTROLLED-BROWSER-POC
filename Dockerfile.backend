@@ -58,6 +58,9 @@ RUN pip install --no-cache-dir uv
 # Install Python dependencies using uv (much faster)
 RUN uv pip install --system --no-cache -r requirements.linux.txt
 
+# Download required NLTK data for TTS sentence tokenization
+RUN python -c "import nltk; nltk.download('punkt_tab', quiet=True)"
+
 # Copy backend code
 COPY aibrowser/ ./aibrowser/
 COPY run_api_server.py .
