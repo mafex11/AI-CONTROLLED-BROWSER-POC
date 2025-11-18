@@ -35,7 +35,6 @@ class AgentBridge:
 		self._tts_queue: asyncio.Queue = asyncio.Queue()
 		self._tts_processing = False
 		self._tts_task: Optional[asyncio.Task] = None
-		self._audio_playback_complete_future: Optional[asyncio.Future] = None
 
 	async def process_user_text(self, text: str) -> None:
 		"""Process user speech transcript and run agent."""
@@ -61,12 +60,14 @@ class AgentBridge:
 
 		if self.on_user_speech:
 			try:
+				logger.debug('Calling on_user_speech callback with: "%s"', text)
 				if asyncio.iscoroutinefunction(self.on_user_speech):
 					await self.on_user_speech(text)
 				else:
 					self.on_user_speech(text)
+				logger.debug('on_user_speech callback completed')
 			except Exception as e:
-				logger.warning('Error in on_user_speech callback: %s', e)
+				logger.warning('Error in on_user_speech callback: %s', e, exc_info=True)
 
 		# Check if we're continuing a conversation after await_user_input
 		is_continuation = self._awaiting_user_input
@@ -206,15 +207,16 @@ class AgentBridge:
 							logger.debug(f'Step {step} (before): {message}')
 							_last_tts_message = message
 							
-							# Create a future for audio playback completion
-							self._audio_playback_complete_future = asyncio.get_event_loop().create_future()
-							
 							# Send TTS (audio will stream to frontend and play there)
 							await self._send_to_tts(message)
 							
-							# Wait for frontend to signal audio playback completion
-							logger.debug(f'Waiting for audio playback to complete before executing tool...')
-							await self.wait_for_audio_playback_complete(timeout=30.0)
+							# Wait for speech to complete before executing the action
+							if self._speech_tracker:
+								logger.debug(f'Waiting for speech to complete before executing action...')
+								await self._speech_tracker.wait_for_speech_completion(timeout=30.0)
+								logger.debug(f'Speech completed, proceeding with action execution')
+							else:
+								logger.warning('No speech tracker available, proceeding immediately')
 					
 					return
 				elif phase == 'after':
@@ -299,12 +301,15 @@ class AgentBridge:
 
 				if self.on_agent_response:
 					try:
+						response_text = result.get('message', '')
+						logger.debug('Calling on_agent_response callback with: "%s"', response_text)
 						if asyncio.iscoroutinefunction(self.on_agent_response):
-							await self.on_agent_response(result.get('message', ''))
+							await self.on_agent_response(response_text)
 						else:
-							self.on_agent_response(result.get('message', ''))
+							self.on_agent_response(response_text)
+						logger.debug('on_agent_response callback completed')
 					except Exception as e:
-						logger.warning('Error in on_agent_response callback: %s', e)
+						logger.warning('Error in on_agent_response callback: %s', e, exc_info=True)
 
 			finally:
 				# Restore both callbacks to their original state
@@ -341,10 +346,11 @@ class AgentBridge:
 			logger.warning('_send_to_tts: No TTS processor set')
 			return
 		
+		text = text.strip()
 		logger.debug(f'_send_to_tts: Queuing text for TTS: "{text[:100]}{"..." if len(text) > 100 else ""}"')
 		
 		# Queue the text for sequential processing
-		await self._tts_queue.put(text.strip())
+		await self._tts_queue.put(text)
 		
 		# Start TTS processing task if not already running
 		if not self._tts_processing:
@@ -390,21 +396,4 @@ class AgentBridge:
 
 	def is_processing(self) -> bool:
 		return self._processing
-	
-	async def wait_for_audio_playback_complete(self, timeout: float = 30.0) -> None:
-		"""Wait for frontend to signal audio playback completion."""
-		if self._audio_playback_complete_future and not self._audio_playback_complete_future.done():
-			try:
-				await asyncio.wait_for(self._audio_playback_complete_future, timeout=timeout)
-				logger.debug('Audio playback completed')
-			except asyncio.TimeoutError:
-				logger.warning('Timeout waiting for audio playback completion, proceeding anyway')
-			except Exception as e:
-				logger.error('Error waiting for audio playback completion: %s', e)
-	
-	def signal_audio_playback_complete(self) -> None:
-		"""Signal that frontend has completed audio playback."""
-		if self._audio_playback_complete_future and not self._audio_playback_complete_future.done():
-			self._audio_playback_complete_future.set_result(None)
-			logger.debug('Audio playback completion signal received')
 

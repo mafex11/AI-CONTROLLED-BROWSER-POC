@@ -25,6 +25,13 @@ RUN apt-get update && apt-get install -y \
     # Audio dependencies for pipecat
     libportaudio2 \
     portaudio19-dev \
+    # OpenCV dependencies (for WebRTC cv2)
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libgomp1 \
+    libgthread-2.0-0 \
     # Build dependencies
     gcc \
     g++ \

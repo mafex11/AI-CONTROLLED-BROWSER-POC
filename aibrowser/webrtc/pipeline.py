@@ -62,6 +62,9 @@ class WebRTCPipeline:
 
     async def initialize(self) -> None:
         """Build Pipecat pipeline around the provided SmallWebRTC connection."""
+        import time
+        start_time = time.time()
+        
         from pipecat.services.deepgram.stt import DeepgramSTTService
         from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 
@@ -121,6 +124,9 @@ class WebRTCPipeline:
 
         self.task = PipelineTask(self.pipeline)
         self.runner = PipelineRunner()
+        
+        elapsed = time.time() - start_time
+        logger.info("WebRTC pipeline initialized in %.2fs", elapsed)
 
     async def run(self) -> None:
         """Start the Pipecat runner."""

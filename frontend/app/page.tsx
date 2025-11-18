@@ -9,7 +9,7 @@ import { Select } from "@/components/ui/select";
 import { Mic, Send, Loader2, Zap, ChevronLeft, ChevronRight, ChevronDown, Square } from "lucide-react";
 import { NarrationDisplay } from "@/components/narration-display";
 import { ScreenshotDisplay } from "@/components/screenshot-display";
-import { useVoiceWebSocket } from "@/components/voice-websocket";
+import { useVoiceWebRTC } from "@/components/voice-webrtc";
 import { Chat, ChatMessage } from "@/components/chat";
 import { BrowserScreenStream } from "@/components/browser-screen-stream";
 
@@ -52,6 +52,24 @@ export default function Home() {
   const isProcessingAudioQueueRef = useRef(false);
   const nextPlayTimeRef = useRef<number | null>(null);
   const sendVoiceMessageRef = useRef<((message: Record<string, unknown>) => void) | null>(null);
+
+  // Reset browser to blank page on frontend load
+  useEffect(() => {
+    const resetBrowserOnLoad = async () => {
+      try {
+        await fetch("/api/reset-browser", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        console.log("Browser reset to blank page on frontend load");
+      } catch (error) {
+        console.error("Failed to reset browser on load:", error);
+      }
+    };
+    
+    resetBrowserOnLoad();
+  }, []); // Empty dependency array - runs once on mount
 
   // Initialize AudioContext for voice mode
   useEffect(() => {
@@ -204,7 +222,7 @@ export default function Home() {
     processAudioQueue();
   }, [processAudioQueue]);
 
-  const { isConnected: isVoiceConnected, isConnecting: isVoiceConnecting, sendMessage: sendVoiceMessage, disconnect: disconnectVoice } = useVoiceWebSocket({
+  const { isConnected: isVoiceConnected, isConnecting: isVoiceConnecting, sendMessage: sendVoiceMessage, disconnect: disconnectVoice } = useVoiceWebRTC({
     isEnabled: isVoiceMode,
     onUserSpeech: (text) => {
       if (!text.trim()) return;
@@ -225,12 +243,12 @@ export default function Home() {
       
       // Add user message to chat and thinking message
       setChatMessages((prev) => {
-        // Check if we already have a thinking message (processing in progress)
-        const hasThinking = prev.some(msg => msg.isLoading && msg.type === "agent");
+        // Remove any existing thinking messages
+        const withoutThinking = prev.filter(msg => !(msg.isLoading && msg.type === "agent"));
         
-        if (!hasThinking) {
+        // Always add new user message and new thinking message
           return [
-            ...prev,
+          ...withoutThinking,
             {
               id: `user-${Date.now()}`,
               type: "user",
@@ -245,36 +263,6 @@ export default function Home() {
               isLoading: true,
             },
           ];
-        } else {
-          // Update the last user message if we're already processing
-          let lastUserIndex = -1;
-          for (let i = prev.length - 1; i >= 0; i--) {
-            if (prev[i].type === "user") {
-              lastUserIndex = i;
-              break;
-            }
-          }
-          
-          if (lastUserIndex >= 0) {
-            const updated = [...prev];
-            updated[lastUserIndex] = {
-              ...updated[lastUserIndex],
-              content: text,
-              timestamp: new Date(),
-            };
-            return updated;
-          }
-          // If no user message found, add one
-          return [
-            ...prev,
-            {
-              id: `user-${Date.now()}`,
-              type: "user",
-              content: text,
-              timestamp: new Date(),
-            },
-          ];
-        }
       });
     },
     onAgentResponse: (text) => {
@@ -378,13 +366,9 @@ export default function Home() {
     onError: (error) => {
       setVoiceStatus(`Error: ${error}`);
     },
-    onAudioChunk: (audioBase64, sampleRate, numChannels) => {
-      // Play audio chunk as it arrives
-      playAudioChunk(audioBase64, sampleRate, numChannels);
-    },
     onInterruption: () => {
-      // Stop all audio when user interrupts
-      stopAllAudio();
+      // Stop all audio when user interrupts (WebRTC handles audio natively)
+      console.log("User interrupted");
     },
   });
 
@@ -493,7 +477,7 @@ export default function Home() {
         {
           id: `agent-stopped-${Date.now()}`,
           type: "agent",
-          content: "Voice mode stopped by user",
+          content: "Voice mode stopped",
           timestamp: new Date(),
         },
       ];
@@ -1002,18 +986,18 @@ export default function Home() {
                                 type="button"
                                 onClick={handleStopVoiceMode}
                                 variant="destructive"
-                                className="h-12 px-4 shrink-0 rounded-full"
-                                size="lg"
+                                size="icon"
+                                className="h-12 w-12 shrink-0 rounded-full"
                               >
-                                <Mic className="h-5 w-5" />
+                                <Square className="h-5 w-5" />
                               </Button>
                             ) : (
                               <Button
                                 type="button"
                                 onClick={() => setIsVoiceMode(true)}
-                                variant="ghost"
-                                className="h-12 px-3 shrink-0 rounded-full border-2 border-white/30"
-                                size="lg"
+                                variant="outline"
+                                size="icon"
+                                className="h-12 w-12 shrink-0 rounded-full"
                               >
                                 <Mic className="h-5 w-5" />
                               </Button>

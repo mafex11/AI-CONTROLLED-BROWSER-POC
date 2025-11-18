@@ -170,6 +170,18 @@ export function BrowserScreenStream() {
       });
       await pc.setLocalDescription(offer);
 
+      // Set high bitrate for better quality (50 Mbps)
+      const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+      if (sender) {
+        const parameters = sender.getParameters();
+        if (!parameters.encodings) {
+          parameters.encodings = [{}];
+        }
+        parameters.encodings[0].maxBitrate = 50000000; // 50 Mbps
+        await sender.setParameters(parameters);
+        console.log('Set video bitrate to 50 Mbps for high quality');
+      }
+
       // Send offer to backend
       const answer = await postJSON("/api/screen-stream/offer", {
         sdp: offer.sdp,

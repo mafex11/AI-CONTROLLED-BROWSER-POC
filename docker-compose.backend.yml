@@ -6,6 +6,8 @@ services:
     container_name: aibrowser-backend
     ports:
       - "8000:8000"
+      # Expose UDP port range for WebRTC media
+      - "10000-10100:10000-10100/udp"
     environment:
       # Chrome settings
       - CHROMIUM_HEADLESS=true

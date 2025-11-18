@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getBackendUrl } from "@/lib/config";
 
 export const runtime = "nodejs";
 
@@ -24,7 +25,7 @@ export async function POST(request: NextRequest) {
     const stream = new ReadableStream({
       async start(controller) {
         try {
-          const backendUrl = process.env.BACKEND_URL || "http://localhost:8000";
+          const backendUrl = getBackendUrl();
           
           // Call the Python FastAPI backend with abort signal
           const response = await fetch(`${backendUrl}/api/query`, {

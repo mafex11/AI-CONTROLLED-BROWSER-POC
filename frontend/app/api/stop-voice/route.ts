@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getBackendUrl } from "@/lib/config";
 
 export async function POST(request: NextRequest) {
   try {
-    const response = await fetch("http://localhost:8000/api/stop-voice", {
+    const backendUrl = getBackendUrl();
+    const response = await fetch(`${backendUrl}/api/stop-voice`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getBackendUrl } from "@/lib/config";
 
 export async function GET(request: NextRequest) {
   try {
-    const response = await fetch("http://localhost:8000/api/screen-stream/ice-servers", {
+    const backendUrl = getBackendUrl();
+    const response = await fetch(`${backendUrl}/api/screen-stream/ice-servers`, {
       method: "GET",
       headers: {
         "Content-Type": "application/json",

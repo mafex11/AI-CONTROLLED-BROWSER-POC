@@ -1,70 +1,49 @@
-"""Browser session helpers for the WebRTC prototype."""
+"""Browser session helpers for the WebRTC prototype.
+
+This module provides access to the shared global browser instance
+that is used by both text mode and voice mode.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
-from ..browser_use_integration import BrowserUseIntegration
-from ..cdp_browser_manager import CDPBrowserManager
+if TYPE_CHECKING:
+    from ..browser_use_integration import BrowserUseIntegration
 
 logger = logging.getLogger(__name__)
 
 
 class BrowserSessionPool:
-    """Lazily creates a BrowserUseIntegration for the WebRTC pipeline."""
+    """Provides access to the shared global browser for WebRTC voice mode.
+    
+    Instead of creating a separate browser, this reuses the global browser
+    from api_server.py that is shared between text and voice modes.
+    """
 
     def __init__(self) -> None:
-        self._browser_manager: Optional[CDPBrowserManager] = None
-        self._integration: Optional[BrowserUseIntegration] = None
         self._lock = asyncio.Lock()
 
     async def ensure_ready(self) -> BrowserUseIntegration:
-        """Ensure the Chromium backend and BrowserUse integration are running."""
+        """Get the global browser integration (shared with text mode)."""
         async with self._lock:
-            if self._integration and self._browser_manager:
-                if await self._browser_manager.is_running():
-                    return self._integration
-
-            port = int(os.getenv("CHROME_DEBUG_PORT", "9222"))
-            headless = os.getenv("CHROMIUM_HEADLESS", "false").lower() in {"1", "true", "yes", "on"}
-
-            logger.info("Starting dedicated Chromium instance for WebRTC pipeline (headless=%s)", headless)
-            self._browser_manager = CDPBrowserManager(port=port, headless=headless)
-
-            if not await self._browser_manager.start():
-                raise RuntimeError("Failed to start Chromium for WebRTC pipeline")
-
-            ws_url = await self._browser_manager.websocket_url()
-            if not ws_url:
-                raise RuntimeError("Failed to obtain CDP WebSocket URL for WebRTC pipeline")
-
-            self._integration = BrowserUseIntegration(
-                cdp_url=ws_url,
-            )
-
-            if not await self._integration.initialize():
-                raise RuntimeError("Failed to initialize BrowserUseIntegration for WebRTC pipeline")
-
-            logger.info("WebRTC integration connected to Chromium at %s", ws_url)
-            return self._integration
+            # Import here to avoid circular dependency
+            from .. import api_server
+            
+            # Ensure the global browser is initialized
+            if not await api_server.ensure_browser_initialized():
+                raise RuntimeError("Failed to initialize shared browser for WebRTC")
+            
+            if not api_server._text_integration:
+                raise RuntimeError("Browser integration not available")
+            
+            logger.debug("WebRTC voice mode using shared browser integration")
+            return api_server._text_integration
 
     async def cleanup(self) -> None:
-        """Tear down the Chromium process and integration."""
-        async with self._lock:
-            if self._integration:
-                try:
-                    await self._integration.shutdown()
-                except Exception:
-                    logger.debug("Error shutting down WebRTC BrowserUseIntegration", exc_info=True)
-                self._integration = None
-
-            if self._browser_manager:
-                try:
-                    await self._browser_manager.stop()
-                except Exception:
-                    logger.debug("Error stopping Chromium for WebRTC pipeline", exc_info=True)
-                self._browser_manager = None
+        """Cleanup is handled by api_server, not by individual session pools."""
+        # The shared browser is managed by api_server.py, not by WebRTC sessions
+        logger.debug("WebRTC session cleanup (shared browser remains running)")
 

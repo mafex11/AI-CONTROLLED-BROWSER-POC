@@ -26,6 +26,9 @@ from .voice.pipecat_pipeline import VoicePipeline
 from .screen_stream.router import router as screen_stream_router
 from .screen_stream import router as screen_stream_router_module
 
+# Import WebRTC experimental router
+from .webrtc.router import router as webrtc_router
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AI Browser API - Unified Server")
@@ -53,6 +56,9 @@ app.add_middleware(
 # Include screen stream router for WebRTC video streaming
 app.include_router(screen_stream_router)
 
+# Include WebRTC experimental router for voice mode
+app.include_router(webrtc_router)
+
 # Global state
 _browser_manager: Optional[CDPBrowserManager] = None
 _text_integration: Optional[BrowserUseIntegration] = None
@@ -65,6 +71,7 @@ _active_connections: set = set()
 _last_activity_time: float = 0.0
 _cleanup_task: Optional[asyncio.Task] = None
 _idle_timeout: float = float(os.getenv("BROWSER_IDLE_TIMEOUT", "300"))  # 5 minutes default
+_text_awaiting_user_input: bool = False  # Track if text agent is awaiting user input
 
 
 class QueryRequest(BaseModel):
@@ -150,23 +157,14 @@ async def ensure_browser_initialized() -> bool:
 
 
 async def cleanup_browser_if_idle() -> None:
-    """Cleanup browser after idle timeout."""
-    global _browser_manager, _text_integration, _last_activity_time
+    """Cleanup browser after idle timeout - DISABLED.
     
+    Browser cleanup is now handled explicitly via /api/reset-browser.
+    Automatic cleanup was causing issues with frequent reinitializations.
+    """
+    # Disabled - browser stays running once initialized
     while True:
-        try:
-            await asyncio.sleep(30) 
-            
-            if _browser_manager and await _browser_manager.is_running():
-                current_time = time.time()
-                idle_time = current_time - _last_activity_time
-                
-                if idle_time > _idle_timeout and len(_active_connections) == 0:
-                    logger.info(f"Browser idle for {idle_time:.1f}s, cleaning up...")
-                    await cleanup_browser()
-        except Exception as e:
-            logger.error(f"Error in cleanup task: {e}", exc_info=True)
-            await asyncio.sleep(60)
+        await asyncio.sleep(3600)  # Sleep for 1 hour, effectively disabled
 
 
 async def cleanup_browser() -> None:
@@ -215,16 +213,16 @@ async def startup():
         logger.error("Configuration validation failed")
         sys.exit(1)
     
-    logger.info("Starting API server and initializing browser...")
+    logger.info("Starting API server and initializing shared browser...")
     
-    # Initialize browser immediately on startup
+    # Initialize the shared browser (used by both text and voice modes)
     if not await ensure_browser_initialized():
         logger.error("Failed to initialize browser on startup")
         sys.exit(1)
     
     _cleanup_task = asyncio.create_task(cleanup_browser_if_idle())
     
-    logger.info("API server ready with browser initialized")
+    logger.info("API server ready with shared browser initialized (one browser, one tab for both text and voice modes)")
 
 
 @app.on_event("shutdown")
@@ -245,7 +243,7 @@ async def shutdown():
 @app.post("/api/query")
 async def query_text(request: QueryRequest):
     """Handle text mode queries with SSE streaming."""
-    global _text_integration, _active_connections, _last_activity_time
+    global _text_integration, _active_connections, _last_activity_time, _text_awaiting_user_input
     
     if not await ensure_browser_initialized():
         return StreamingResponse(
@@ -257,6 +255,10 @@ async def query_text(request: QueryRequest):
     connection_id = str(uuid.uuid4())
     _active_connections.add(connection_id)
     _last_activity_time = time.time()
+    
+    # Check if this is a continuation of existing conversation
+    is_continuation = _text_awaiting_user_input
+    logger.debug(f"Processing query (is_continuation={is_continuation}): {request.query[:50]}...")
     
     original_provider = Config.LLM_PROVIDER
     provider_changed = False
@@ -318,12 +320,19 @@ async def query_text(request: QueryRequest):
             if phase == 'before':
                 step_counter[0] = step
                 
+                # Only capture screenshot if the agent cached one (e.g., on error or highlight)
+                # Don't do expensive screenshot capture on every step
                 screenshot = None
                 if _text_integration:
                     try:
-                        screenshot = await get_screenshot_base64(_text_integration)
+                        # Check if agent has a cached highlight screenshot
+                        if _text_integration._state and _text_integration._state.agent:
+                            agent = _text_integration._state.agent
+                            if hasattr(agent, '_last_highlight_screenshot_base64') and agent._last_highlight_screenshot_base64:
+                                screenshot = agent._last_highlight_screenshot_base64
+                                logger.debug('Using cached highlight screenshot for step %d', step)
                     except Exception as e:
-                        logger.debug('Failed to get screenshot: %s', e)
+                        logger.debug('Failed to get cached screenshot: %s', e)
                 
                 data = {
                     "type": "step",
@@ -339,9 +348,13 @@ async def query_text(request: QueryRequest):
         _text_integration.update_callbacks(step_callback=step_callback)
         
         async def run_agent():
+            global _text_awaiting_user_input
             try:
-                result = await _text_integration.run(request.query, is_continuation=False)
+                result = await _text_integration.run(request.query, is_continuation=is_continuation)
                 run_result[0] = result
+                # Update awaiting_user_input state for next query
+                _text_awaiting_user_input = result.get('awaiting_user_input', False)
+                logger.debug(f"Agent run complete, awaiting_user_input={_text_awaiting_user_input}")
             except asyncio.CancelledError:
                 logger.info('Agent task was cancelled')
                 run_error[0] = Exception('Task cancelled by user')
@@ -422,233 +435,28 @@ async def query_text(request: QueryRequest):
 
 
 @app.websocket("/ws/voice")
-async def websocket_voice(websocket: WebSocket):
-    """Handle voice mode WebSocket connection."""
-    global _voice_integration, _voice_pipeline, _voice_bridge, _browser_manager, _active_connections, _last_activity_time
+async def websocket_voice_deprecated(websocket: WebSocket):
+    """DEPRECATED: Voice mode now uses WebRTC (/api/webrtc-experimental).
     
+    This endpoint returns an error directing users to use WebRTC instead.
+    The LocalAudioTransport-based voice mode does not work in Docker/cloud deployments.
+    """
     await websocket.accept()
-    logger.info("Voice WebSocket connection established")
-    
-    pipeline_task = None
-    connection_closed = False
-    voice_connection_id = None
-    
-    def is_connected() -> bool:
-        """Check if websocket is still connected."""
-        try:
-            return websocket.client_state.name == "CONNECTED"
-        except Exception:
-            return False
-    
-    async def safe_send_json(data: dict) -> bool:
-        """Safely send JSON to websocket."""
-        if not is_connected():
-            return False
-        try:
-            await websocket.send_json(data)
-            return True
-        except (WebSocketDisconnect, RuntimeError, Exception) as e:
-            logger.debug("Failed to send WebSocket message: %s", e)
-            return False
+    logger.warning("Deprecated /ws/voice endpoint called - directing to WebRTC")
     
     try:
-        if not await ensure_browser_initialized():
-            await safe_send_json({"type": "error", "error": "Failed to initialize browser"})
-            return
-        
-        voice_connection_id = f"voice_{id(websocket)}"
-        _active_connections.add(voice_connection_id)
-        _last_activity_time = time.time()
-        
-        if not _voice_integration:
-            if not Config.validate_voice():
-                await safe_send_json({"type": "error", "error": "Voice configuration invalid"})
-                if voice_connection_id:
-                    _active_connections.discard(voice_connection_id)
-                return
-            
-            ws_url = await _browser_manager.websocket_url()
-            if not ws_url:
-                await safe_send_json({"type": "error", "error": "Failed to get WebSocket URL"})
-                if voice_connection_id:
-                    _active_connections.discard(voice_connection_id)
-                return
-            
-            _voice_integration = BrowserUseIntegration(
-                cdp_url=ws_url,
-                default_search_engine=Config.DEFAULT_SEARCH_ENGINE,
-            )
-            if not await _voice_integration.initialize():
-                await safe_send_json({"type": "error", "error": "Failed to initialize voice integration"})
-                if voice_connection_id:
-                    _active_connections.discard(voice_connection_id)
-                return
-        
-        # Step callback to send step data (narration, screenshots) to frontend
-        async def step_callback(step: int, reasoning: str, narration: str, tool: str, phase: str) -> None:
-            """Send step updates to frontend via WebSocket."""
-            if phase == 'before':
-                if not is_connected():
-                    logger.debug('Step callback: WebSocket not connected, skipping step %d', step)
-                    return
-                
-                logger.debug('Step callback: Sending step %d to frontend', step)
-                
-                screenshot = None
-                if _voice_integration:
-                    try:
-                        screenshot = await get_screenshot_base64(_voice_integration)
-                    except Exception as e:
-                        logger.debug('Failed to get screenshot: %s', e)
-                
-                sent = await safe_send_json({
-                    "type": "step",
-                    "step": step,
-                    "narration": narration or "",
-                    "reasoning": reasoning or "",
-                    "tool": tool or "",
-                    "screenshot": screenshot,
-                })
-                if sent:
-                    logger.debug('Step callback: Successfully sent step %d to frontend', step)
-                else:
-                    logger.warning('Step callback: Failed to send step %d to frontend', step)
-        
-        _voice_integration.update_callbacks(step_callback=step_callback)
-        
-        async def on_user_speech(text: str) -> None:
-            if is_connected():
-                await safe_send_json({"type": "user_speech", "text": text})
-        
-        async def on_agent_response(text: str) -> None:
-            if is_connected():
-                await safe_send_json({"type": "agent_response", "text": text})
-        
-        if not _voice_bridge:
-            _voice_bridge = AgentBridge(
-                integration=_voice_integration,
-                on_user_speech=on_user_speech,
-                on_agent_response=on_agent_response,
-            )
-        else:
-            _voice_bridge.on_user_speech = on_user_speech
-            _voice_bridge.on_agent_response = on_agent_response
-        
-        if not _voice_pipeline:
-            _voice_pipeline = VoicePipeline(
-                agent_bridge=_voice_bridge,
-                deepgram_api_key=Config.DEEPGRAM_API_KEY,
-                elevenlabs_api_key=Config.ELEVENLABS_API_KEY,
-                elevenlabs_voice_id=Config.ELEVENLABS_VOICE_ID,
-                deepgram_language=Config.DEEPGRAM_LANGUAGE,
-            )
-            
-            if not await _voice_pipeline.initialize():
-                await safe_send_json({"type": "error", "error": "Failed to initialize voice pipeline"})
-                return
-            
-            _voice_pipeline.set_websocket_sender(safe_send_json)
-            
-            pipeline_task = asyncio.create_task(_voice_pipeline.run())
-        else:
-            _voice_pipeline.set_websocket_sender(safe_send_json)
-        
-        if not await safe_send_json({"type": "ready"}):
-            logger.warning("Failed to send ready message, connection may be closed")
-            return
-        
-        while is_connected():
-            try:
-                data = await websocket.receive_json()
-                
-                if data.get("type") == "text_input":
-                    text = data.get("text", "")
-                    if text and _voice_bridge:
-                        await _voice_bridge.process_user_text(text)
-                
-                elif data.get("type") == "audio_playback_complete":
-                    # Frontend signals that audio playback has completed
-                    if _voice_bridge:
-                        _voice_bridge.signal_audio_playback_complete()
-                
-                elif data.get("type") == "stop":
-                    # Stop voice pipeline completely
-                    logger.info("Voice mode stop requested - shutting down pipeline")
-                    
-                    # Stop pipeline first
-                    if _voice_pipeline:
-                        try:
-                            await _voice_pipeline.stop()
-                        except Exception as e:
-                            logger.error(f"Error stopping voice pipeline: {e}")
-                    
-                    # Clear global references
-                    _voice_pipeline = None
-                    _voice_bridge = None
-                    
-                    # Shutdown voice integration but keep text integration intact
-                    if _voice_integration:
-                        try:
-                            await _voice_integration.shutdown()
-                        except Exception as e:
-                            logger.error(f"Error shutting down voice integration: {e}")
-                        _voice_integration = None
-                    
-                    logger.info("Voice pipeline stopped successfully - text mode ready")
-                    break
-                    
-            except WebSocketDisconnect:
-                logger.info("Voice WebSocket disconnected by client")
-                connection_closed = True
-                break
-            except Exception as e:
-                logger.error("Error receiving WebSocket message: %s", e, exc_info=True)
-                if is_connected():
-                    await safe_send_json({"type": "error", "error": str(e)})
-                break
-    
-    except WebSocketDisconnect:
-        logger.info("Voice WebSocket disconnected during initialization")
-        connection_closed = True
+        await websocket.send_json({
+            "type": "error",
+            "error": "Voice mode via WebSocket is deprecated. Please use WebRTC (/api/webrtc-experimental) instead. "
+                     "The WebSocket voice mode requires physical audio devices and does not work in Docker/cloud deployments."
+        })
     except Exception as e:
-        logger.error("Error in voice WebSocket handler: %s", e, exc_info=True)
-        if is_connected():
-            await safe_send_json({"type": "error", "error": str(e)})
+        logger.error("Error sending deprecation message: %s", e)
     finally:
-        # Stop voice pipeline when WebSocket disconnects
-        logger.info("Voice WebSocket connection closed - stopping voice pipeline")
-        
-        if _voice_pipeline:
-            try:
-                await _voice_pipeline.stop()
-            except Exception as e:
-                logger.error(f"Error stopping voice pipeline in finally block: {e}")
-            _voice_pipeline = None
-        
-        if _voice_bridge:
-            _voice_bridge.on_user_speech = None
-            _voice_bridge.on_agent_response = None
-            _voice_bridge = None
-        
-        if _voice_integration:
-            _voice_integration.update_callbacks(step_callback=None)
-            try:
-                await _voice_integration.shutdown()
-            except Exception as e:
-                logger.error(f"Error shutting down voice integration in finally block: {e}")
-            _voice_integration = None
-        
-        if voice_connection_id:
-            _active_connections.discard(voice_connection_id)
-        _last_activity_time = time.time()
-        
-        if is_connected() and not connection_closed:
             try:
                 await websocket.close()
             except Exception:
                 pass
-        
-        logger.info("Voice pipeline cleanup complete")
 
 
 @app.post("/api/cleanup")
@@ -701,38 +509,90 @@ async def stop_voice():
 
 @app.post("/api/reset-browser")
 async def reset_browser():
-    """Reset browser to blank page when frontend closes."""
-    global _browser_manager
+    """Reset the shared browser to blank page when frontend session starts/ends.
+    
+    Both text and voice modes use the same browser, so this resets the single
+    shared browser instance and clears conversation state.
+    """
+    global _browser_manager, _text_integration, _last_activity_time, _text_awaiting_user_input
+    
+    # Update activity time to prevent idle cleanup
+    _last_activity_time = time.time()
+    
+    # Reset conversation state
+    _text_awaiting_user_input = False
     
     try:
+        # Ensure browser is initialized before trying to reset
+        if not _browser_manager:
+            logger.debug("Browser manager not initialized, initializing now for reset")
+            if not await ensure_browser_initialized():
+                logger.warning("Failed to initialize browser for reset")
+                return {"status": "error", "message": "Failed to initialize browser"}
+        
+        # Reset the shared browser (used by both text and voice modes)
         if _browser_manager and await _browser_manager.is_running():
-            logger.info("Resetting browser to blank page")
+            logger.info("Resetting shared browser to blank page and clearing session state")
             
             # Get CDP websocket URL
             cdp_url = await _browser_manager.websocket_url()
-            if not cdp_url:
-                logger.warning("No CDP URL available")
-                return {"status": "error", "message": "Browser not running"}
-            
-            # Connect to CDP and navigate to blank page
-            async with aiohttp.ClientSession() as session:
-                async with session.ws_connect(cdp_url) as ws:
-                    # Enable Page domain
-                    await ws.send_json({"id": 1, "method": "Page.enable"})
-                    await ws.receive()
+            if cdp_url:
+                try:
+                    # Connect to CDP and navigate to blank page
+                    async with aiohttp.ClientSession() as session:
+                        async with session.ws_connect(cdp_url) as ws:
+                            # Enable Page domain
+                            await ws.send_json({"id": 1, "method": "Page.enable"})
+                            await asyncio.wait_for(ws.receive(), timeout=5.0)
+                            
+                            # Navigate to about:blank
+                            await ws.send_json({
+                                "id": 2,
+                                "method": "Page.navigate",
+                                "params": {"url": "about:blank"}
+                            })
+                            result = await asyncio.wait_for(ws.receive(), timeout=5.0)
+                            logger.debug(f"Navigation to blank result: {result}")
                     
-                    # Navigate to about:blank
-                    await ws.send_json({
-                        "id": 2,
-                        "method": "Page.navigate",
-                        "params": {"url": "about:blank"}
-                    })
-                    await ws.receive()
-            
-            logger.info("Browser reset to blank page successfully")
-            return {"status": "success"}
+                    logger.info("Shared browser navigated to blank page via CDP")
+                except Exception as e:
+                    logger.error(f"Error navigating to blank page: {e}", exc_info=True)
+                
+                # Clear conversation state without reinitializing
+                # (to avoid race conditions with active voice mode)
+                if _text_integration and _text_integration._state:
+                    try:
+                        # Clear the agent's conversation history
+                        if hasattr(_text_integration._state, 'agent') and _text_integration._state.agent:
+                            agent = _text_integration._state.agent
+                            if hasattr(agent, '_context_log'):
+                                agent._context_log = []
+                                logger.debug("Cleared agent context log")
+                            if hasattr(agent, 'messages'):
+                                # Keep only system message if it exists
+                                system_msgs = [m for m in agent.messages if m.get('role') == 'system']
+                                agent.messages = system_msgs
+                                logger.debug("Reset agent message history")
+                        
+                        # Force state refresh to update to blank page
+                        if _text_integration._state.controller:
+                            logger.debug("Refreshing integration state on blank page")
+                            await _text_integration._state.controller.refresh_state(
+                                include_dom=True,
+                                include_screenshot=False,
+                            )
+                        
+                        logger.info("Cleared conversation state without reinitializing (avoids race conditions)")
+                    except Exception as e:
+                        logger.warning("Error clearing conversation state: %s", e, exc_info=True)
+                
+                logger.info("Shared browser reset complete (affects both text and voice modes)")
+                return {"status": "success", "shared_browser_reset": True}
+            else:
+                logger.warning("No CDP URL available for browser reset")
+                return {"status": "error", "message": "No CDP URL available"}
         else:
-            logger.info("Browser not running, nothing to reset")
+            logger.info("No browser running, nothing to reset")
             return {"status": "not_running"}
     except Exception as e:
         logger.error(f"Error resetting browser: {e}", exc_info=True)

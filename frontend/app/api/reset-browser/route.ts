@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getBackendUrl } from "@/lib/config";
 
 export async function POST(request: NextRequest) {
   try {
-    const response = await fetch("http://localhost:8000/api/reset-browser", {
+    const backendUrl = getBackendUrl();
+    const response = await fetch(`${backendUrl}/api/reset-browser`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

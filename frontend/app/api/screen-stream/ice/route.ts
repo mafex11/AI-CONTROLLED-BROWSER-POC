@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getBackendUrl } from "@/lib/config";
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
+    const backendUrl = getBackendUrl();
     
-    const response = await fetch("http://localhost:8000/api/screen-stream/ice", {
+    const response = await fetch(`${backendUrl}/api/screen-stream/ice`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

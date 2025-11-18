@@ -20,17 +20,17 @@ class CDPScreenCapture:
     def __init__(
         self,
         cdp_url: str,
-        fps: int = 2,
-        quality: int = 80,
+        fps: int = 60,
+        quality: int = 100,
         format: str = "jpeg",
     ) -> None:
         """
-        Initialize CDP screen capture.
+        Initialize CDP screen capture with high quality settings.
 
         Args:
             cdp_url: WebSocket URL for Chrome DevTools Protocol
-            fps: Frames per second for capture (default 2)
-            quality: JPEG quality 1-100 (default 80)
+            fps: Frames per second for capture (default 60 for smooth video)
+            quality: JPEG quality 1-100 (default 100 for maximum quality)
             format: Image format 'jpeg' or 'png'
         """
         self.cdp_url = cdp_url
@@ -40,11 +40,11 @@ class CDPScreenCapture:
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._running = False
-        self._frame_queue: asyncio.Queue = asyncio.Queue(maxsize=10)
+        self._frame_queue: asyncio.Queue = asyncio.Queue(maxsize=30)  # Larger buffer for 60fps
         self._capture_task: Optional[asyncio.Task] = None
         self._message_id = 0
-        self._frame_width = 1920
-        self._frame_height = 1080
+        self._frame_width = 1280  # 720p width
+        self._frame_height = 720   # 720p height
 
     async def start(self) -> None:
         """Start capturing frames from the browser."""
@@ -73,10 +73,25 @@ class CDPScreenCapture:
         
         self._ws = await self._session.ws_connect(self.cdp_url)
         self._running = True
+        
+        # Set viewport size for 720p capture (improves video quality)
+        try:
+            await self._send_command(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": self._frame_width,
+                    "height": self._frame_height,
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                }
+            )
+            logger.info("Set viewport to %dx%d for 720p capture", self._frame_width, self._frame_height)
+        except Exception as e:
+            logger.warning("Failed to set viewport size: %s (will use default)", e)
 
         # Start the capture loop
         self._capture_task = asyncio.create_task(self._capture_loop())
-        logger.info("CDP screen capture started at %d FPS", self.fps)
+        logger.info("CDP screen capture started at %d FPS with quality %d", self.fps, self.quality)
 
     async def stop(self) -> None:
         """Stop capturing frames."""
