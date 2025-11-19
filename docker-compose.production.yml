@@ -12,6 +12,9 @@ services:
       - CHROME_DEBUG_PORT=9222
       - DEFAULT_SEARCH_ENGINE=google
       
+      # CORS settings (optional - allows all origins for development)
+      - ALLOW_ALL_ORIGINS=${ALLOW_ALL_ORIGINS:-false}
+      
       # LLM Provider
       - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
       

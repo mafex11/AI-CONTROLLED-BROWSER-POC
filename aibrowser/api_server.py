@@ -38,8 +38,7 @@ app = FastAPI(title="AI Browser API - Unified Server")
 allowed_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    # Add your Vercel domain here after deployment
-    # "https://your-app.vercel.app",
+    "https://layerpathaivoicebrowser.vercel.app",
 ]
 # Also allow any origin if ALLOW_ALL_ORIGINS is set (for development)
 if os.getenv("ALLOW_ALL_ORIGINS", "false").lower() in {"true", "1", "yes"}:
