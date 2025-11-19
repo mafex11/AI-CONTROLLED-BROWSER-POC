@@ -70,7 +70,7 @@ export function useVoiceWebRTC(props: VoiceWebRTCProps) {
         })),
       });
     } catch (error) {
-      console.error("Failed to flush ICE candidates:", error);
+      // Failed to flush ICE candidates
     }
   }, []);
 
@@ -129,9 +129,7 @@ export function useVoiceWebRTC(props: VoiceWebRTCProps) {
       audioRef.current.srcObject = remoteStream;
 
       pc.ontrack = (event) => {
-        console.log("Received remote track:", event.track.kind);
         event.streams[0]?.getTracks().forEach((track) => {
-          console.log("Adding track to remote stream:", track.kind);
           remoteStream.addTrack(track);
         });
       };
@@ -146,14 +144,13 @@ export function useVoiceWebRTC(props: VoiceWebRTCProps) {
         }
         flushTimerRef.current = setTimeout(() => {
           flushTimerRef.current = null;
-          flushCandidates().catch((error) => {
-            console.error("Failed to flush ICE candidates", error);
+          flushCandidates().catch(() => {
+            // ICE candidate flush failed
           });
         }, 300);
       };
 
       pc.oniceconnectionstatechange = () => {
-        console.log("ICE connection state:", pc.iceConnectionState);
         if (pc.iceConnectionState === "failed" || pc.iceConnectionState === "closed") {
           const callbacks = callbacksRef.current;
           if (callbacks.onError) {
@@ -168,7 +165,6 @@ export function useVoiceWebRTC(props: VoiceWebRTCProps) {
       const localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       mediaStreamRef.current = localStream;
       localStream.getTracks().forEach((track) => {
-        console.log("Adding local track:", track.kind);
         pc.addTrack(track, localStream);
       });
 
@@ -193,7 +189,7 @@ export function useVoiceWebRTC(props: VoiceWebRTCProps) {
       eventSourceRef.current = eventSource;
 
       eventSource.onopen = () => {
-        console.log("Event stream connected");
+        // Event stream connected
       };
 
       eventSource.onmessage = (event) => {
@@ -202,7 +198,7 @@ export function useVoiceWebRTC(props: VoiceWebRTCProps) {
           const callbacks = callbacksRef.current;
 
           if (data.type === "ready") {
-            console.log("Event stream ready");
+            // Event stream ready
           } else if (data.type === "user_speech" && callbacks.onUserSpeech) {
             callbacks.onUserSpeech(data.text);
           } else if (data.type === "agent_response" && callbacks.onAgentResponse) {
@@ -218,16 +214,15 @@ export function useVoiceWebRTC(props: VoiceWebRTCProps) {
           } else if (data.type === "error" && callbacks.onError) {
             callbacks.onError(data.error);
           } else if (data.type === "closed") {
-            console.log("Event stream closed by server");
+            // Event stream closed by server
             stopConnection();
           }
         } catch (e) {
-          console.error("Failed to parse SSE message:", e);
+          // Failed to parse SSE message
         }
       };
 
-      eventSource.onerror = (error) => {
-        console.error("Event stream error:", error);
+      eventSource.onerror = () => {
         const callbacks = callbacksRef.current;
         if (callbacks.onError) {
           callbacks.onError("Event stream connection error");
@@ -236,9 +231,7 @@ export function useVoiceWebRTC(props: VoiceWebRTCProps) {
 
       setState("connected");
       setIsConnecting(false);
-      console.log("WebRTC connection established with event stream");
     } catch (error) {
-      console.error("Failed to start WebRTC session", error);
       const callbacks = callbacksRef.current;
       if (callbacks.onError) {
         callbacks.onError(error instanceof Error ? error.message : "Unknown error");
@@ -276,11 +269,9 @@ export function useVoiceWebRTC(props: VoiceWebRTCProps) {
     isConnecting,
     sendText: useCallback(() => {
       // Text input not supported in WebRTC mode - voice only
-      console.warn("Text input not supported in WebRTC voice mode");
     }, []),
     sendMessage: useCallback(() => {
       // Message sending not supported in WebRTC mode
-      console.warn("Message sending not supported in WebRTC voice mode");
     }, []),
     disconnect,
   };

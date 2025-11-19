@@ -101,8 +101,8 @@ export function ExperimentalWebRTCPanel() {
         }
         flushTimerRef.current = setTimeout(() => {
           flushTimerRef.current = null;
-          flushCandidates().catch((error) => {
-            console.error("Failed to flush ICE candidates", error);
+          flushCandidates().catch(() => {
+            // Failed to flush ICE candidates
           });
         }, 300);
       };
@@ -125,7 +125,6 @@ export function ExperimentalWebRTCPanel() {
 
       setState("connected");
     } catch (error) {
-      console.error("Failed to start WebRTC session", error);
       setErrorMessage(error instanceof Error ? error.message : "Unknown error");
       setState("error");
     }

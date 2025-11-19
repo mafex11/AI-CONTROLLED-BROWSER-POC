@@ -102,7 +102,7 @@ export function BrowserScreenStream() {
         setIsFullscreen(false);
       }
     } catch (error) {
-      console.error("Fullscreen error:", error);
+      // Fullscreen error
     }
   }, []);
 
@@ -148,8 +148,8 @@ export function BrowserScreenStream() {
         }
         flushTimerRef.current = setTimeout(() => {
           flushTimerRef.current = null;
-          flushCandidates().catch((error) => {
-            console.error("Failed to flush ICE candidates", error);
+          flushCandidates().catch(() => {
+            // Failed to flush ICE candidates
           });
         }, 300);
       };
@@ -179,7 +179,6 @@ export function BrowserScreenStream() {
         }
         parameters.encodings[0].maxBitrate = 50000000; // 50 Mbps
         await sender.setParameters(parameters);
-        console.log('Set video bitrate to 50 Mbps for high quality');
       }
 
       // Send offer to backend
@@ -196,7 +195,6 @@ export function BrowserScreenStream() {
         type: answer.type,
       }));
     } catch (error) {
-      console.error("Failed to start screen stream", error);
       setErrorMessage(error instanceof Error ? error.message : "Unknown error");
       setState("error");
     }

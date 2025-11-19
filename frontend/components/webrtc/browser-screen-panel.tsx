@@ -96,9 +96,7 @@ export function BrowserScreenPanel() {
       }
 
       pc.ontrack = (event) => {
-        console.log("Received track:", event.track.kind);
         event.streams[0]?.getTracks().forEach((track) => {
-          console.log("Adding track to stream:", track.kind);
           remoteStream.addTrack(track);
         });
       };
@@ -113,14 +111,13 @@ export function BrowserScreenPanel() {
         }
         flushTimerRef.current = setTimeout(() => {
           flushTimerRef.current = null;
-          flushCandidates().catch((error) => {
-            console.error("Failed to flush ICE candidates", error);
+          flushCandidates().catch(() => {
+            // Failed to flush ICE candidates
           });
         }, 300);
       };
 
       pc.onconnectionstatechange = () => {
-        console.log("Connection state:", pc.connectionState);
         if (pc.connectionState === "connected") {
           setState("connected");
         } else if (pc.connectionState === "failed") {
@@ -149,10 +146,7 @@ export function BrowserScreenPanel() {
         sdp: answer.sdp,
         type: answer.type,
       }));
-
-      console.log("Screen stream connection established");
     } catch (error) {
-      console.error("Failed to start screen stream", error);
       setErrorMessage(error instanceof Error ? error.message : "Unknown error");
       setState("error");
     }
