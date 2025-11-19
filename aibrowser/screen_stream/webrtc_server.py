@@ -92,6 +92,9 @@ class ScreenStreamSession:
         Returns:
             Dictionary with answer SDP and type
         """
+        # Fix iOS Safari SDP compatibility issues
+        offer_sdp = self._fix_ios_sdp(offer_sdp)
+        
         # Create peer connection with proper RTCConfiguration
         configuration = None
         if self.ice_servers:
@@ -140,6 +143,54 @@ class ScreenStreamSession:
             "sdp": self.pc.localDescription.sdp,
             "type": self.pc.localDescription.type,
         }
+    
+    @staticmethod
+    def _fix_ios_sdp(sdp: str) -> str:
+        """
+        Fix iOS Safari SDP compatibility issues.
+        
+        iOS Safari sometimes creates SDP with missing or invalid direction attributes
+        which causes aiortc to fail with "ValueError: None is not in list".
+        This function ensures all media sections have proper direction attributes.
+        """
+        lines = sdp.split('\r\n')
+        result = []
+        in_media_section = False
+        has_direction = False
+        media_type = None
+        
+        for i, line in enumerate(lines):
+            # Check if we're entering a new media section
+            if line.startswith('m='):
+                # If we were in a media section without direction, add recvonly
+                if in_media_section and not has_direction:
+                    result.append('a=recvonly')
+                
+                in_media_section = True
+                has_direction = False
+                media_type = line.split(' ')[0].replace('m=', '')
+                result.append(line)
+                continue
+            
+            # Check for direction attributes
+            if line.startswith('a=sendrecv') or line.startswith('a=recvonly') or \
+               line.startswith('a=sendonly') or line.startswith('a=inactive'):
+                has_direction = True
+                result.append(line)
+                continue
+            
+            # If we hit another media section or end, check if we need to add direction
+            if (line.startswith('m=') or i == len(lines) - 1) and in_media_section and not has_direction:
+                result.append('a=recvonly')
+                has_direction = True
+            
+            result.append(line)
+        
+        # Check the last media section
+        if in_media_section and not has_direction:
+            result.append('a=recvonly')
+        
+        return '\r\n'.join(result)
 
     async def add_ice_candidate(self, candidate: dict) -> None:
         """Add an ICE candidate to the peer connection."""
