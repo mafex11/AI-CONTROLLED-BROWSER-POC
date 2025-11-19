@@ -186,10 +186,16 @@ class CDPBrowserManager:
 
 	async def is_running(self) -> bool:
 		if not self._running:
+			logger.debug("is_running: _running is False")
 			return False
 		if self._playwright_browser is not None:
-			return self._playwright_browser.is_connected()
+			result = self._playwright_browser.is_connected()
+			logger.debug(f"is_running: playwright browser connected={result}")
+			return result
 		if self._chrome_process is not None:
-			return self._chrome_process.poll() is None
+			result = self._chrome_process.poll() is None
+			logger.debug(f"is_running: chrome process poll={self._chrome_process.poll()}, is_running={result}")
+			return result
+		logger.debug("is_running: no browser process found")
 		return False
 

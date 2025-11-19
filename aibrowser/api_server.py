@@ -521,41 +521,54 @@ async def reset_browser():
     # Reset conversation state
     _text_awaiting_user_input = False
     
+    logger.info("Reset browser endpoint called")
+    
     try:
-        # Ensure browser is initialized before trying to reset
-        if not _browser_manager:
-            logger.debug("Browser manager not initialized, initializing now for reset")
-            if not await ensure_browser_initialized():
-                logger.warning("Failed to initialize browser for reset")
-                return {"status": "error", "message": "Failed to initialize browser"}
+        # Try to navigate to about:blank even if browser manager says it's not running
+        # (Chrome might still be running on the port)
+        port = int(os.getenv('CHROME_DEBUG_PORT', '9222'))
+        endpoint = f"http://localhost:{port}"
         
-        # Reset the shared browser (used by both text and voice modes)
-        if _browser_manager and await _browser_manager.is_running():
-            logger.info("Resetting shared browser to blank page and clearing session state")
-            
-            # Get CDP websocket URL
-            cdp_url = await _browser_manager.websocket_url()
-            if cdp_url:
-                try:
-                    # Connect to CDP and navigate to blank page
-                    async with aiohttp.ClientSession() as session:
-                        async with session.ws_connect(cdp_url) as ws:
-                            # Enable Page domain
-                            await ws.send_json({"id": 1, "method": "Page.enable"})
-                            await asyncio.wait_for(ws.receive(), timeout=5.0)
-                            
-                            # Navigate to about:blank
-                            await ws.send_json({
-                                "id": 2,
-                                "method": "Page.navigate",
-                                "params": {"url": "about:blank"}
-                            })
-                            result = await asyncio.wait_for(ws.receive(), timeout=5.0)
-                            logger.debug(f"Navigation to blank result: {result}")
+        try:
+            # Get list of targets to find a page target
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{endpoint}/json", timeout=aiohttp.ClientTimeout(total=2)) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"CDP endpoint returned status {resp.status}, browser may not be running")
+                        return {"status": "not_running", "message": "Browser not responding"}
                     
-                    logger.info("Shared browser navigated to blank page via CDP")
-                except Exception as e:
-                    logger.error(f"Error navigating to blank page: {e}", exc_info=True)
+                    targets = await resp.json()
+                    
+                    # Find the first page target
+                    page_ws_url = None
+                    for target in targets:
+                        if target.get("type") == "page":
+                            page_ws_url = target.get("webSocketDebuggerUrl")
+                            break
+                    
+                    if not page_ws_url:
+                        logger.warning("No page target found, cannot navigate to about:blank")
+                        return {"status": "error", "message": "No page target found"}
+                    
+                    logger.info(f"Found page target, navigating to about:blank")
+                    
+                    # Connect to the page target and navigate
+                    async with session.ws_connect(page_ws_url) as ws:
+                        # Enable Page domain
+                        await ws.send_json({"id": 1, "method": "Page.enable"})
+                        await asyncio.wait_for(ws.receive(), timeout=5.0)
+                        
+                        # Navigate to about:blank
+                        await ws.send_json({
+                            "id": 2,
+                            "method": "Page.navigate",
+                            "params": {"url": "about:blank"}
+                        })
+                        result = await asyncio.wait_for(ws.receive(), timeout=5.0)
+                        logger.info(f"Successfully navigated to about:blank")
+                        logger.debug(f"Navigation result: {result}")
+                
+                logger.info("Browser reset to blank page complete")
                 
                 # Clear conversation state without reinitializing
                 # (to avoid race conditions with active voice mode)
@@ -581,20 +594,20 @@ async def reset_browser():
                                 include_screenshot=False,
                             )
                         
-                        logger.info("Cleared conversation state without reinitializing (avoids race conditions)")
+                        logger.info("Cleared conversation state")
                     except Exception as e:
                         logger.warning("Error clearing conversation state: %s", e, exc_info=True)
                 
-                logger.info("Shared browser reset complete (affects both text and voice modes)")
-                return {"status": "success", "shared_browser_reset": True}
-            else:
-                logger.warning("No CDP URL available for browser reset")
-                return {"status": "error", "message": "No CDP URL available"}
-        else:
-            logger.info("No browser running, nothing to reset")
-            return {"status": "not_running"}
+                return {"status": "success", "navigated_to_blank": True}
+                
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning(f"Could not connect to browser at {endpoint}: {e}")
+            return {"status": "not_running", "message": "Browser not accessible"}
+        except Exception as e:
+            logger.error(f"Error navigating to blank page: {e}", exc_info=True)
+            return {"status": "error", "message": str(e)}
     except Exception as e:
-        logger.error(f"Error resetting browser: {e}", exc_info=True)
+        logger.error(f"Error in reset browser endpoint: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
 
 
